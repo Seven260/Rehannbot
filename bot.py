@@ -8,7 +8,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeybo
 
 # إعدادات البوت
 TOKEN = "8165570365:AAFxiQdzjETg37Uv0NWqMtcfr0qDT-0vLHY"  # ضع توكن البوت الصحيح هنا
-ADMIN_ID = 734722575      # ضع معرف الأدمن الصحيح هنا
+ADMIN_ID = 7347225275      # ضع معرف الأدمن الصحيح هنا
 SUPPORT_LINK = "https://t.me/Vuvuvuuu_bot"  # رابط الدعم لشحن الرصيد
 
 # إعدادات الدعوات
