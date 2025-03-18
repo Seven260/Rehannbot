@@ -14,6 +14,7 @@ SUPPORT_LINK = "https://t.me/Vuvuvuuu_bot"  # رابط الدعم لشحن ال�
 # إعدادات الدعوات
 INVITE_ENABLED = True  # تفعيل أو تعطيل نظام الدعوات
 INVITE_POINTS = 10  # عدد النقاط المكتسبة عند دعوة صديق
+user_invites = 0  # عدد الدعوات الخاصة بالمستخدم
 
 bot = telebot.TeleBot(TOKEN)
 
@@ -231,12 +232,18 @@ def invite_friends(message):
         return
     
     invite_link = f"https://t.me/{bot.get_me().username}?start={user_id}"
-    bot.send_message(user_id, f"🎟 شارك رابط الدعوة الخاص بك:\n\n{invite_link}", parse_mode="Markdown")
+    bot.send_message(user_id, f"انسخ الرابط ثم قم بمشاركته مع اصدقائك 📥 .\n\n • كل شخص يقوم بالدخول ستحصل على {INVITE_POINTS} 💲\n\n  بإمكانك عمل اعلان خاص برابط الدعوة الخاص بك\n\n ~ رابط الدعوة :{invite_link}\n\n• مشاركتك للرابط : {user_invites} 🌀", parse_mode="Markdown")
 
-@bot.message_handler(func=lambda m: m.text == button_names["sh_charge"])
+@bot.message_handler(func=lambda m: m.text == "💳 شحن الرصيد")
 def recharge_balance(message):
     user_id = message.chat.id
-    bot.send_message(user_id, f"⚠️ للتواصل مع الدعم لشحن رصيدك:\n{SUPPORT_LINK}")
+
+    # إنشاء زر شفاف يحتوي على رابط الوكيل
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("💳 تواصل مع الدعم", url=SUPPORT_LINK))
+
+    # إرسال الرسالة مع الزر
+    bot.send_message(user_id, "⚠️ للتواصل مع الدعم لشحن رصيدك:", reply_markup=markup)
 
 # ===================== قسم الألعاب =====================
 @bot.message_handler(func=lambda m: m.text == "🎮 الألعاب")
@@ -364,10 +371,11 @@ trivia_questions = [
 ]
     # يمكن إضافة المزيد حتى 50 سؤال
 
-# قائمة المعرفات الخاصة بالمشرفين (يمكنك تعديلها وإضافة أكثر من ID)
-ADMIN_IDS = [7347225275]  # استبدل 123456789 بـ ID الأدمن الفعلي
+# قائمة معرفات الأدمن
+ADMIN_IDS = [7347225275]  # استبدل بالـ ID الخاص بالأدمن الحقيقي
 
-@bot.message_handler(func=lambda message: message.text == button_names["balance"])
+# ✅ دالة لعرض رصيد المستخدم عند الضغط على الزر
+@bot.message_handler(func=lambda message: message.text == "💰 معرفة الرصيد")
 def show_balance(message):
     user_id = message.from_user.id
 
@@ -378,20 +386,9 @@ def show_balance(message):
     # تجهيز رسالة الرصيد
     user_balance_text = f"💰 رصيدك الحالي: {user[0]} نقطة." if user else "💸 ليس لديك نقاط حالياً."
 
-    # التحقق مما إذا كان المستخدم أدمن أم لا
-    if user_id not in ADMIN_IDS:
-        # استعلام لجلب رصيد الأدمن
-        cursor.execute("SELECT SUM(points) FROM users WHERE id IN ({})".format(
-            ",".join("?" * len(ADMIN_IDS))
-        ), ADMIN_IDS)
-        admin_balance = cursor.fetchone()[0] or 0  # في حالة عدم وجود نقاط
-        admin_text = f"\n👑 رصيد الأدمن: {admin_balance} نقطة."
-    else:
-        admin_text = ""  # لا نضيف رصيد الأدمن لنفسه
+    # إرسال الرسالة بدون إظهار رصيد الأدمن
+    bot.send_message(message.chat.id, user_balance_text)
 
-    # إرسال الرسالة مرة واحدة فقط
-    bot.send_message(message.chat.id, user_balance_text + admin_text)
-        
 @bot.message_handler(func=lambda m: m.text == button_names["trivia"])
 def play_trivia(message):
     user_id = message.chat.id
@@ -411,7 +408,7 @@ def play_trivia(message):
             except Exception:
                 break
         bot.edit_message_text(chat_id=user_id, message_id=msg.message_id,
-                              text=f"⏰ انتهى الوقت! الجواب الصحيح: {question_data['a']}")
+                              text=f"⏰ انتهى الوقت! ")
         remove_points(user_id, GAME_SETTINGS["trivia"]["loss"])
     threading.Thread(target=countdown).start()
     def check_answer(msg):
@@ -442,7 +439,7 @@ def play_trivia(message):
             except Exception:
                 break
         bot.edit_message_text(chat_id=user_id, message_id=msg.message_id,
-                              text=f"⏰ انتهى الوقت! الجواب الصحيح: {question_data['a']}")
+                              text=f"⏰ انتهى الوقت!")
         remove_points(user_id, GAME_SETTINGS["trivia"]["loss"])
     threading.Thread(target=countdown).start()
     def check_answer(msg):
@@ -451,7 +448,7 @@ def play_trivia(message):
             bot.send_message(user_id, f"✅ إجابة صحيحة! ربحت {GAME_SETTINGS['trivia']['win']} نقطة.")
         else:
             remove_points(user_id, GAME_SETTINGS["trivia"]["loss"])
-            bot.send_message(user_id, f"❌ إجابة خاطئة! الجواب الصحيح: {question_data['a']}. تم خصم {GAME_SETTINGS['trivia']['loss']} نقطة.")
+            bot.send_message(user_id, f"❌ إجابة خاطئة!.تم خصم {GAME_SETTINGS['trivia']['loss']} نقطة.")
     bot.register_next_step_handler(message, check_answer)
 
 # --- لعبة عجلة الحظ ---
@@ -557,7 +554,7 @@ def admin_panel_handler(message):
 @bot.callback_query_handler(func=lambda call: call.data in [
     "broadcast", "admin_add_points", "admin_remove_points", "set_channel",
     "edit_welcome", "toggle_notifications", "toggle_bot", "edit_game_settings",
-    "edit_game_prices", "edit_game_points", "set_trivia_time", "toggle_invite"
+    "edit_game_prices", "edit_game_points", "set_trivia_time", "toggle_invite", "set_invite_points"
 ])
 def handle_admin_buttons(call):
     if call.from_user.id != ADMIN_ID:
@@ -708,8 +705,11 @@ def admin_set_channel(message):
 def set_invite_points_handler(message):
     global INVITE_POINTS
     try:
-        pts = int(message.text)
-        INVITE_POINTS = pts
+        points = int(message.text)
+        if points < 0:
+            raise ValueError("❌ يجب أن تكون النقاط 0 أو أكثر!")
+
+        INVITE_POINTS = points
         bot.send_message(ADMIN_ID, f"✅ تم تعيين نقاط الدعوة إلى {INVITE_POINTS} نقطة.")
     except ValueError:
         bot.send_message(ADMIN_ID, "⚠️ يرجى إدخال رقم صحيح.")
