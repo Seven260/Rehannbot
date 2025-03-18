@@ -7,7 +7,7 @@ import json
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
 # إعدادات البوت
-TOKEN = "8165570365:AAFxiQdzjETg37Uv0NWqMtcfr0qDT-0vLHY"  # ضع توكن البوت الصحيح هنا
+TOKEN = "8082637402:AAFbvK7g5YSNm7N7vvNdIVpOIDazyKX9oRQ"  # ضع توكن البوت الصحيح هنا
 ADMIN_ID = 7347225275      # ضع معرف الأدمن الصحيح هنا
 SUPPORT_LINK = "https://t.me/Vuvuvuuu_bot"  # رابط الدعم لشحن الرصيد
 
@@ -368,13 +368,26 @@ trivia_questions = [
 @bot.message_handler(func=lambda message: message.text == button_names["balance"])
 def show_balance(message):
     user_id = message.from_user.id
+
+    # استعلام لجلب رصيد المستخدم
     cursor.execute("SELECT points FROM users WHERE id=?", (user_id,))
     user = cursor.fetchone()
 
-    if user:
-        bot.send_message(message.chat.id, f"💰 رصيدك الحالي: {user[0]} نقطة.")
+    # استعلام لجلب رصيد الأدمن (نفترض أن الأدمن له ID معين في قاعدة البيانات)
+    cursor.execute("SELECT SUM(points) FROM users WHERE id IN ({})".format(
+        ",".join("?" * len(ADMIN_IDS))
+    ), ADMIN_IDS)
+    admin_balance = cursor.fetchone()[0] or 0  # في حالة عدم وجود نقاط
+
+    # تجهيز رسالة الرصيد
+    user_balance_text = f"💰 رصيدك الحالي: {user[0]} نقطة." if user else "💸 ليس لديك نقاط حالياً."
+    
+    if user_id in ADMIN_IDS:
+        admin_text = f"\n👑 رصيد الأدمن: {admin_balance} نقطة."
     else:
-        bot.send_message(message.chat.id, "💸 ليس لديك نقاط حالياً.")
+        admin_text = ""
+
+    bot.send_message(message.chat.id, user_balance_text + admin_text)
         
 @bot.message_handler(func=lambda m: m.text == button_names["trivia"])
 def play_trivia(message):
