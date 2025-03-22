@@ -3,17 +3,22 @@ import sqlite3
 import random
 import time
 import threading
+import os
 import json
+from PIL import Image, ImageDraw, ImageFont
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
 # إعدادات البوت
-TOKEN = "7984622218:AAEhjLtLp2WFWLdYxcVxmxW-AQAf4nKShiI"  # ضع توكن البوت الصحيح هنا
+TOKEN = "7384344681:AAHQvoGlwyX3D9VNXMwayi4qcWa4AgCzpDM"  # ضع توكن البوت الصحيح هنا
 ADMIN_ID = 7347225275      # ضع معرف الأدمن الصحيح هنا
 SUPPORT_LINK = "https://t.me/Vuvuvuuu_bot"  # رابط الدعم لشحن الرصيد
 
 # إعدادات الدعوات
 INVITE_ENABLED = True  # تفعيل أو تعطيل نظام الدعوات
+NOTIFICATIONS_ENABLED = True  # الافتراضي: إشعارات الدخول مفعلة
 INVITE_POINTS = 10  # عدد النقاط المكتسبة عند دعوة صديق
+BOT_ACTIVE = True  # الافتراضي: البوت يعمل
+memory_games = {}  # ✅ تخزين حالة كل مستخدم في اختبار الذاكرة
 user_invites = 0  # عدد الدعوات الخاصة بالمستخدم
 
 bot = telebot.TeleBot(TOKEN)
@@ -44,6 +49,22 @@ cursor.execute('''CREATE TABLE IF NOT EXISTS tasks (
     task_goal INTEGER,
     reward INTEGER
 )''')
+
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS daily_tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task TEXT NOT NULL,
+        points INTEGER NOT NULL
+    )
+''')
+cursor.execute('''
+    CREATE TABLE IF NOT EXISTS user_tasks (
+        user_id INTEGER,
+        task_id INTEGER,
+        completed BOOLEAN DEFAULT 0,
+        UNIQUE(user_id, task_id)
+    )
+''')
 
 conn.commit()  # حفظ التغييرات في قاعدة البيانات
 
@@ -121,10 +142,11 @@ def remove_points(user_id, amount):
 
 # لوحة المستخدم (ReplyKeyboardMarkup بأزرار عادية)
 def get_user_menu():
-    markup = ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.row(KeyboardButton(button_names["balance"]), KeyboardButton("🎮 الألعاب"))
-    markup.row(KeyboardButton(button_names["referral"]))
-    markup.add(KeyboardButton(button_names["sh_charge"]))
+    markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup.row(KeyboardButton("💰 معرفة الرصيد"), KeyboardButton("🎮 الألعاب"))
+    markup.row(KeyboardButton("🔄 تحويل النقاط"), KeyboardButton("🎟 دعوة الأصدقاء"))
+    markup.row(KeyboardButton("💳 سحب النقاط"), KeyboardButton("💳 شحن الرصيد"))
+    markup.row(KeyboardButton("📅 المهام اليومية"))  # ✅ إضافة زر المهام اليومية هنا
     return markup
 
 def get_games_menu():
@@ -151,9 +173,13 @@ def get_admin_menu():
         InlineKeyboardButton("💰 إضافة نقاط", callback_data="admin_add_points")
     )
     markup.add(
+    InlineKeyboardButton("➕ إضافة نقاط للجميع", callback_data="add_points_all"),
+    InlineKeyboardButton("➖ خصم نقاط من الجميع", callback_data="remove_points_all")
+    )
+    markup.add(
         InlineKeyboardButton("❌ خصم نقاط", callback_data="admin_remove_points"),
         InlineKeyboardButton("⏳ تعديل وقت اختبار الذاكرة", callback_data="set_memory_time"),
-        InlineKeyboardButton("🔗 تعيين قناة اشتراك", callback_data="set_channel")
+        InlineKeyboardButton("🔗 تعيين قناة اشتراك", callback_data="set_channel"),
     )
     markup.add(
         InlineKeyboardButton("⚙ تعديل رسالة الترحيب", callback_data="edit_welcome"),
@@ -168,6 +194,7 @@ def get_admin_menu():
         InlineKeyboardButton("🔢 تعديل نقاط اللعبة", callback_data="edit_game_points")
     )
     markup.add(
+        InlineKeyboardButton("📅 إدارة المهام اليومية", callback_data="manage_tasks"),
         InlineKeyboardButton("⏰ تعديل وقت الأسئلة", callback_data="set_trivia_time")
     )
     markup.add(
@@ -181,7 +208,11 @@ def get_admin_menu():
 def send_welcome(message):
     user_id = message.chat.id
     username = message.from_user.username if message.from_user.username else "NoUsername"
-    
+
+    if not BOT_ACTIVE and user_id != ADMIN_ID:  # ✅ محاذاة صحيحة داخل الدالة
+        bot.send_message(user_id, "⚠️ البوت متوقف حاليًا من قبل الإدارة.")
+        return
+
     # استخراج معرف المُرسل من رابط الدعوة إن وجد
     args = message.text.split()
     referrer_id = None
@@ -222,21 +253,30 @@ def send_welcome(message):
         bot.send_message(user_id, f"🎉 مرحبا يا👈 {message.from_user.first_name} 👉نورت البوت \n \n رصيدك الحالي👈: {user[2]} نقطة.", reply_markup=get_user_menu())
 
 # زر دعوة الأصدقاء (للمستخدم)
-@bot.message_handler(func=lambda m: m.text == button_names["referral"])
+@bot.message_handler(func=lambda m: m.text == "🎟 دعوة الأصدقاء")
 def invite_friends(message):
-    user_id = message.chat.id
-    
-    # ✅ التحقق إذا كان رابط الدعوة موقوفًا
-    if not INVITE_ENABLED:
-        bot.send_message(user_id, "⚠️ عذرًا، ميزة مشاركة رابط الدعوة متوقفة حاليًا.")
+    user_id = message.chat.id  # ✅ تعريف user_id في البداية
+
+    if not BOT_ACTIVE:
+        bot.send_message(user_id, "⚠️ البوت متوقف حاليًا، لا يمكنك دعوة الأصدقاء الآن.")
         return
-    
+
+    invite_link = f"https://t.me/{bot.get_me().username}?start={user_id}"
+
+    # جلب عدد الدعوات من قاعدة البيانات
+    cursor.execute("SELECT invites FROM users WHERE id=?", (user_id,))
+    row = cursor.fetchone()
+    user_invites = row[0] if row else 0  # إذا لم يكن هناك سجل، افتراضيًا 0
     invite_link = f"https://t.me/{bot.get_me().username}?start={user_id}"
     bot.send_message(user_id, f"انسخ الرابط ثم قم بمشاركته مع اصدقائك 📥 .\n\n • كل شخص يقوم بالدخول ستحصل على {INVITE_POINTS} 💲\n\n  بإمكانك عمل اعلان خاص برابط الدعوة الخاص بك\n\n ~ رابط الدعوة :{invite_link}\n\n• مشاركتك للرابط : {user_invites} 🌀", parse_mode="Markdown")
 
 @bot.message_handler(func=lambda m: m.text == "💳 شحن الرصيد")
-def recharge_balance(message):
-    user_id = message.chat.id
+def charge_points(message):
+    user_id = message.chat.id  # ✅ تعريف user_id في بداية الدالة
+
+    if not BOT_ACTIVE:
+        bot.send_message(user_id, "⚠️ البوت متوقف حاليًا، لا يمكنك شحن النقاط الآن.")
+        return
 
     # إنشاء زر شفاف يحتوي على رابط الوكيل
     markup = InlineKeyboardMarkup()
@@ -269,7 +309,9 @@ def show_games(message):
 @bot.message_handler(func=lambda m: m.text == "🏆 تخمين مكان الكرة")
 def play_guess_ball(message):
     user_id = message.chat.id
-
+    if not BOT_ACTIVE:
+        bot.send_message(user_id, "⚠️ البوت متوقف حاليًا من قبل الإدارة.")
+        return
     # التحقق من رصيد اللاعب
     cursor.execute("SELECT points FROM users WHERE id=?", (user_id,))
     row = cursor.fetchone()
@@ -312,11 +354,15 @@ def back_to_main(message):
 @bot.message_handler(func=lambda m: m.text == button_names["guess"])
 def play_guess(message):
     user_id = message.chat.id
+    if not BOT_ACTIVE:
+        bot.send_message(user_id, "⚠️ البوت متوقف حاليًا من قبل الإدارة.")
+        return
     cursor.execute("SELECT points FROM users WHERE id=?", (user_id,))
     row = cursor.fetchone()
     if not row or row[0] < GAME_SETTINGS["guess"]["entry"]:
-        bot.send_message(user_id, f"⚠️ لا تملك نقاط كافية للعب. تكلفة اللعبة: {GAME_SETTINGS['guess']['entry']} نقطة. يرجى شحن رصيدك عبر الوكيل.", reply_markup=get_user_menu())
+        bot.send_message(user_id, f"⚠️ لا تملك نقاط كافية للعب. تكلفة اللعبة: {GAME_SETTINGS['guess']['entry']} نقطة.", reply_markup=get_user_menu())
         return
+
     secret_number = random.randint(1, 10)
     bot.send_message(user_id, "🔢 اختر رقمًا بين 1 و 10!")
     def check_guess(msg):
@@ -405,40 +451,199 @@ def show_balance(message):
     # إرسال الرسالة بدون إظهار رصيد الأدمن
     bot.send_message(message.chat.id, user_balance_text)
 
-@bot.message_handler(func=lambda m: m.text == button_names["trivia"])
-def play_trivia(message):
+@bot.message_handler(func=lambda m: m.text == "🔄 تحويل النقاط")
+def transfer_points(message):
+    if not BOT_ACTIVE:
+        bot.send_message(message.chat.id, "⚠️ البوت متوقف حاليًا، لا يمكنك تحويل النقاط الآن.")
+        return
+
+    bot.send_message(message.chat.id, "🔢 أرسل معرف المستخدم والمبلغ المراد تحويله بالشكل التالي:\n`user_id amount`", parse_mode="Markdown")
+    bot.register_next_step_handler(message, process_transfer)
+
+def process_transfer(message):
+    try:
+        sender_id = message.chat.id
+
+        if not BOT_ACTIVE:
+            bot.send_message(sender_id, "⚠️ البوت متوقف حاليًا، لا يمكنك تحويل النقاط الآن.")
+            return
+
+        recipient_id, amount = map(int, message.text.split())
+
+        if sender_id == recipient_id:
+            bot.send_message(sender_id, "❌ لا يمكنك تحويل النقاط إلى نفسك!")
+            return
+
+        cursor.execute("SELECT points FROM users WHERE id=?", (sender_id,))
+        sender_points = cursor.fetchone()
+        if not sender_points or sender_points[0] < amount:
+            bot.send_message(sender_id, "❌ رصيدك غير كافٍ لإتمام التحويل!")
+            return
+
+        # خصم النقاط من المرسل
+        remove_points(sender_id, amount)
+
+        # تطبيق العمولة
+        fee = int(amount * TRANSFER_FEE_PERCENTAGE / 100)
+        final_amount = amount - fee
+
+        # إضافة النقاط إلى المستلم
+        add_points(recipient_id, final_amount)
+
+        bot.send_message(sender_id, f"✅ تم تحويل {final_amount} نقطة إلى المستخدم {recipient_id}. (تم خصم {fee} نقطة كعمولة)")
+        bot.send_message(recipient_id, f"🎉 لقد استلمت {final_amount} نقطة من المستخدم {sender_id}!")
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ تنسيق غير صحيح، استخدم: `user_id amount`", parse_mode="Markdown")
+
+@bot.message_handler(func=lambda message: message.text == "💳 سحب النقاط")
+def withdraw_points(message):
     user_id = message.chat.id
+
+    # التحقق من رصيد المستخدم
     cursor.execute("SELECT points FROM users WHERE id=?", (user_id,))
     row = cursor.fetchone()
-    if not row or row[0] < GAME_SETTINGS["trivia"]["entry"]:
-        bot.send_message(user_id, f"⚠️ لا تملك نقاط كافية للعب. تكلفة اللعبة: {GAME_SETTINGS['trivia']['entry']} نقطة. يرجى شحن رصيدك عبر الوكيل.", reply_markup=get_user_menu())
+
+    if not row or row[0] < 1:
+        bot.send_message(user_id, "❌ ليس لديك نقاط كافية للسحب.")
         return
-    question_data = random.choice(trivia_questions)
-    msg = bot.send_message(user_id, f"❓ {question_data['q']}\n⏳ لديك {GAME_SETTINGS['trivia']['time']} ثوانٍ للإجابة:")
-    def countdown():
-        for i in range(GAME_SETTINGS["trivia"]["time"], 0, -1):
-            try:
-                bot.edit_message_text(chat_id=user_id, message_id=msg.message_id,
-                                      text=f"❓ {question_data['q']}\n⏳ {i} ثانية متبقية")
-                time.sleep(1)
-            except Exception:
-                break
-        bot.edit_message_text(chat_id=user_id, message_id=msg.message_id,
-                              text=f"⏰ انتهى الوقت! ")
-        remove_points(user_id, GAME_SETTINGS["trivia"]["loss"])
-    threading.Thread(target=countdown).start()
-    def check_answer(msg):
-        if msg.text.strip().lower() == question_data["a"].lower():
-            add_points(user_id, GAME_SETTINGS["trivia"]["win"])
-            bot.send_message(user_id, f"✅ إجابة صحيحة! ربحت {GAME_SETTINGS['trivia']['win']} نقطة.")
-        else:
-            remove_points(user_id, GAME_SETTINGS["trivia"]["loss"])
-            bot.send_message(user_id, f"❌ إجابة خاطئة! تم خصم {GAME_SETTINGS['trivia']['loss']} نقطة.")
-    bot.register_next_step_handler(message, check_answer)
+
+    user_points = row[0]
+    msg = bot.send_message(
+        user_id, 
+        f"💰 لديك {user_points} نقطة.\n"
+        "🔢 أدخل عدد النقاط التي ترغب في سحبها.\n"
+        "📢 ملاحظة: كل 10 نقاط في هذا البوت = 100 نقطة في بوت التمويل!\n"
+        "📌 مثال: 100",
+        parse_mode="Markdown"
+    )
+    bot.register_next_step_handler(msg, ask_bot_username)
+
+def ask_bot_username(message):
+    user_id = message.chat.id
+
+    try:
+        amount = int(message.text)
+        if amount <= 0:
+            bot.send_message(user_id, "❌ يجب أن يكون المبلغ أكبر من 0.")
+            bot.register_next_step_handler(message, ask_bot_username)
+            return
+
+        cursor.execute("SELECT points FROM users WHERE id=?", (user_id,))
+        row = cursor.fetchone()
+        if not row or row[0] < amount:
+            bot.send_message(user_id, "❌ ليس لديك نقاط كافية للسحب.")
+            bot.register_next_step_handler(message, ask_bot_username)
+            return
+
+        deducted_amount = amount // 10
+        memory_games[user_id] = {"amount": amount, "deducted": deducted_amount}
+
+        msg = bot.send_message(
+            user_id, 
+            f"📢 سيتم خصم **{deducted_amount} نقطة** من رصيدك.\n"
+            "🤖 أدخل يوزر البوت المراد السحب منه:\n"
+            "✅ البوتات المسموح السحب منها:\n"
+            "- @yynnurybot\n- @MHDN313bot\n- @srwry2bot",
+            parse_mode="Markdown"
+        )
+        bot.register_next_step_handler(msg, process_withdrawal)
+
+    except ValueError:
+        bot.send_message(user_id, "⚠️ يرجى إدخال رقم صحيح.")
+        bot.register_next_step_handler(message, ask_bot_username)
+
+def process_withdrawal(message):  
+    user_id = message.chat.id
+    bot_username = message.text.strip().lower()
+
+    allowed_bots = ["@yynnurybot", "@MHDN313bot", "@srwry2bot"]
+
+    if bot_username not in allowed_bots:
+        msg = bot.send_message(user_id, "❌ البوت الذي أدخلته غير مسموح السحب منه.\n💬 تواصل مع المطور أو أدخل يوزر بوت آخر:")
+        bot.register_next_step_handler(msg, process_withdrawal)
+        return  
+
+    amount = memory_games[user_id]["amount"]
+    deducted_amount = memory_games[user_id]["deducted"]
+
+    cursor.execute("UPDATE users SET points = points - ? WHERE id=?", (deducted_amount, user_id))
+    conn.commit()
+
+    # ✅ إرسال إشعار للأدمن مع زر شفاف للرد
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("📩 إرسال رابط النقاط", callback_data=f"send_points:{user_id}"))
+
+    bot.send_message(
+        ADMIN_ID, 
+        f"🔔 طلب جديد لسحب النقاط:\n"
+        f"👤 المستخدم: @{message.from_user.username if message.from_user.username else 'لا يوجد يوزر'}\n"
+        f"💰 النقاط المطلوبة: {amount} نقطة\n"
+        f"❌ النقاط التي تم خصمها: {deducted_amount} نقطة\n"
+        f"🤖 البوت المطلوب السحب منه: {bot_username}",
+        reply_markup=markup
+    )
+
+    bot.send_message(user_id, "✅ تم خصم النقاط من رصيدك.\n⏳ عندما يكون المطور متصلًا بالإنترنت، سيتم إرسال رابط النقاط إليك.")
+
+@bot.message_handler(func=lambda message: message.text == "📅 المهام اليومية")
+def show_daily_tasks(message):
+    user_id = message.chat.id
+
+    cursor.execute("SELECT id, task, points FROM daily_tasks")
+    tasks = cursor.fetchall()
+
+    if not tasks:
+        bot.send_message(user_id, "🚫 لا توجد مهام يومية متاحة حاليًا.")
+        return
+
+    response = "📅 *المهام اليومية المتاحة:*\n\n"
+    keyboard = InlineKeyboardMarkup()
+
+    for task_id, task_text, points in tasks:
+        response += f"- {task_text} ({points} نقطة)\n"
+        keyboard.add(InlineKeyboardButton(f"✔️ إتمام المهمة", callback_data=f"complete_task_{task_id}"))
+
+    bot.send_message(user_id, response, parse_mode="Markdown", reply_markup=keyboard)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("complete_task_"))
+def complete_task(call):
+    user_id = call.from_user.id
+    task_id = int(call.data.split("_")[2])
+
+    # التحقق مما إذا كان المستخدم قد أكمل المهمة من قبل
+    cursor.execute("SELECT completed FROM user_tasks WHERE user_id=? AND task_id=?", (user_id, task_id))
+    task_status = cursor.fetchone()
+
+    if task_status and task_status[0]:  # المهمة مكتملة مسبقًا
+        bot.answer_callback_query(call.id, "✅ لقد أكملت هذه المهمة بالفعل!")
+        return
+
+    # الحصول على نقاط المهمة
+    cursor.execute("SELECT points FROM daily_tasks WHERE id=?", (task_id,))
+    task_points = cursor.fetchone()
+
+    if not task_points:
+        bot.answer_callback_query(call.id, "❌ هذه المهمة غير موجودة.")
+        return
+
+    points = task_points[0]
+
+    # تحديث قاعدة البيانات وإضافة النقاط للمستخدم
+    cursor.execute("INSERT OR REPLACE INTO user_tasks (user_id, task_id, completed) VALUES (?, ?, 1)", (user_id, task_id))
+    cursor.execute("UPDATE users SET points = points + ? WHERE id=?", (points, user_id))
+    conn.commit()
+
+    bot.answer_callback_query(call.id, f"🎉 لقد أكملت المهمة بنجاح وحصلت على {points} نقطة!")
+    bot.send_message(user_id, f"🎉 لقد أكملت المهمة وحصلت على {points} نقطة!")
+
+    bot.send_message(user_id, response, parse_mode="Markdown", reply_markup=keyboard)
 
 @bot.message_handler(func=lambda m: m.text == button_names["trivia"])
 def play_trivia(message):
     user_id = message.chat.id
+    if not BOT_ACTIVE:
+        bot.send_message(user_id, "⚠️ البوت متوقف حاليًا من قبل الإدارة.")
+        return
     cursor.execute("SELECT points FROM users WHERE id=?", (user_id,))
     row = cursor.fetchone()
     if not row or row[0] < GAME_SETTINGS["trivia"]["entry"]:
@@ -471,7 +676,9 @@ def play_trivia(message):
 @bot.message_handler(func=lambda m: m.text == button_names["wheel"])
 def play_wheel_game(message):
     user_id = message.chat.id
-
+    if not BOT_ACTIVE:
+        bot.send_message(user_id, "⚠️ البوت متوقف حاليًا من قبل الإدارة.")
+        return
     # التحقق من رصيد المستخدم
     cursor.execute("SELECT points FROM users WHERE id=?", (user_id,))
     row = cursor.fetchone()
@@ -507,6 +714,9 @@ def play_wheel_game(message):
 @bot.message_handler(func=lambda m: m.text == "🧠 اختبار الذاكرة")
 def play_memory_game(message):
     user_id = message.chat.id
+    if not BOT_ACTIVE:
+        bot.send_message(user_id, "⚠️ البوت متوقف حاليًا من قبل الإدارة.")
+        return
 
     # التحقق من الرصيد
     cursor.execute("SELECT points FROM users WHERE id=?", (user_id,))
@@ -522,34 +732,50 @@ def play_memory_game(message):
     # إنشاء رقم عشوائي مكون من 5 أرقام
     memory_number = "".join(str(random.randint(0, 9)) for _ in range(5))
 
-    # إرسال الرقم إلى المستخدم مع عداد تنازلي
-    time_limit = GAME_SETTINGS["memory"]["time"]
+    # تخزين حالة اللعبة لمنع المستخدم من إرسال الإجابة قبل انتهاء العد التنازلي
+    memory_games[user_id] = {"number": memory_number, "active": True}
+
+    # إرسال الرقم إلى المستخدم مع رسالة العد التنازلي
+    time_limit = GAME_SETTINGS["trivia"]["time"]
     msg = bot.send_message(user_id, f"🔢 تذكر هذا الرقم: **{memory_number}**\n⏳ لديك {time_limit} ثوانٍ لحفظه!", parse_mode="Markdown")
 
-    # دالة للعد التنازلي وحذف الرقم
-    def countdown():
-        for i in range(time_limit, 0, -1):
-            try:
-                bot.edit_message_text(chat_id=user_id, message_id=msg.message_id, 
-                                      text=f"🔢 تذكر هذا الرقم \n{memory_number}\n⏳ {i} ثانية متبقية!", 
-                                      parse_mode="Markdown")
-                time.sleep(1)
-            except:
-                break
-        
-        # حذف الرقم بعد انتهاء الوقت
+    # تشغيل العد التنازلي في `Thread`
+    thread = threading.Thread(target=countdown, args=(time_limit, user_id, msg.message_id, message, memory_number))
+    thread.start()
+
+def countdown(time_limit, user_id, message_id, message, memory_number):
+    """دالة العد التنازلي وحماية المستخدم من الغش"""
+    for i in range(time_limit, 0, -2):
         try:
-            bot.edit_message_text(chat_id=user_id, message_id=msg.message_id, text="❓ الآن، ما هو الرقم الذي تذكرته؟")
+            bot.edit_message_text(
+                chat_id=user_id,
+                message_id=message_id,
+                text=f"🔢 تذكر هذا الرقم: **{memory_games[user_id]['number']}**\n⏳ لديك {i} ثانية متبقية!",
+                parse_mode="Markdown"
+            )
+            time.sleep(1)
         except:
-            pass
+            break  # إذا حدث خطأ أثناء التعديل، لا تتوقف اللعبة
 
-    threading.Thread(target=countdown).start()
+    # بعد انتهاء العد التنازلي، إزالة الرقم والسماح بالإجابة
+    bot.edit_message_text(
+        chat_id=user_id,
+        message_id=message_id,
+        text="❓ الآن، ما هو الرقم الذي تذكرته؟"
+    )
 
-    # انتظار المستخدم لإدخال الرقم
+    # السماح للمستخدم بالإجابة بعد انتهاء العد التنازلي
+    memory_games[user_id]["active"] = False
     bot.register_next_step_handler(message, lambda m: check_memory_game(m, memory_number))
 
 def check_memory_game(message, correct_number):
     user_id = message.chat.id
+
+    # التحقق مما إذا كان المستخدم يحاول الغش بإرسال الإجابة مبكرًا
+    if memory_games.get(user_id, {}).get("active", True):
+        bot.send_message(user_id, "⚠️ لا يمكنك إرسال الإجابة قبل انتهاء وقت الحفظ!")
+        return
+
     user_answer = message.text.strip()
 
     if user_answer == correct_number:
@@ -557,37 +783,47 @@ def check_memory_game(message, correct_number):
         bot.send_message(user_id, f"✅ إجابة صحيحة! ربحت {GAME_SETTINGS['memory']['win']} نقطة.")
     else:
         remove_points(user_id, GAME_SETTINGS["memory"]["loss"])
-        bot.send_message(user_id, f"❌ إجابة خاطئة! الرقم الصحيح كان: **{correct_number}**\nتم خصم {GAME_SETTINGS['memory']['loss']} نقطة.", parse_mode="Markdown")
+        bot.send_message(user_id, f"❌ إجابة خاطئة!\nالرقم الصحيح كان: **{correct_number}**\nتم خصم {GAME_SETTINGS['memory']['loss']} نقطة.", parse_mode="Markdown")
+
+    # حذف بيانات اللعبة بعد انتهاء الجواب
+    memory_games.pop(user_id, None)
 
 # ===================== أوامر الإدارة =====================
-@bot.message_handler(commands=['admin'])
-def admin_panel_handler(message):
-    if message.chat.id == ADMIN_ID:
-        bot.send_message(ADMIN_ID, "⚙ *لوحة الإدارة:*", reply_markup=get_admin_menu(), parse_mode="Markdown")
-    else:
-        bot.send_message(message.chat.id, "❌ ليس لديك صلاحيات لاستخدام هذه الأوامر.")
-
 @bot.callback_query_handler(func=lambda call: call.data in [
     "broadcast", "admin_add_points", "admin_remove_points", "set_channel",
-    "edit_welcome", "toggle_notifications", "toggle_bot", "edit_game_settings",
-    "edit_game_prices", "edit_game_points", "set_trivia_time", "toggle_invite", "set_invite_points"
+    "add_points_all", "remove_points_all", "edit_welcome", "toggle_notifications",
+    "toggle_bot", "edit_game_settings", "edit_game_prices", "edit_game_points",
+    "set_trivia_time", "toggle_invite", "manage_tasks", "set_invite_points", "set_transfer_fee"
 ])
+
 def handle_admin_buttons(call):
     if call.from_user.id != ADMIN_ID:
         bot.answer_callback_query(call.id, "❌ ليس لديك صلاحيات!")
         return
 
-    if call.data == "broadcast":
-        bot.send_message(ADMIN_ID, "✉️ أرسل الرسالة التي تريد إرسالها لجميع المستخدمين:")
-        bot.register_next_step_handler(call.message, admin_broadcast)
-
-    elif call.data == "admin_add_points":
+    if call.data == "admin_add_points":
         bot.send_message(ADMIN_ID, "💰 أدخل معرف المستخدم وعدد النقاط للإضافة (مثال: 123456 50):")
         bot.register_next_step_handler(call.message, admin_add_points_handler)
 
     elif call.data == "admin_remove_points":
         bot.send_message(ADMIN_ID, "❌ أدخل معرف المستخدم وعدد النقاط للخصم (مثال: 123456 30):")
         bot.register_next_step_handler(call.message, admin_remove_points_handler)
+
+    elif call.data == "manage_tasks":
+        bot.send_message(ADMIN_ID, "📌 أرسل المهمة اليومية الجديدة بهذا الشكل:\n\nالمهمة | عدد النقاط")
+        bot.register_next_step_handler(call.message, add_daily_task)
+
+    elif call.data == "add_points_all":  # ✅ إضافة نقاط للجميع
+        bot.send_message(ADMIN_ID, "💰 أدخل عدد النقاط التي تريد إضافتها لجميع المستخدمين:")
+        bot.register_next_step_handler(call.message, admin_add_points_all)
+
+    elif call.data == "remove_points_all":  # ✅ خصم نقاط من الجميع
+        bot.send_message(ADMIN_ID, "❌ أدخل عدد النقاط التي تريد خصمها من جميع المستخدمين:")
+        bot.register_next_step_handler(call.message, admin_remove_points_all)
+
+    elif call.data == "broadcast":
+        bot.send_message(ADMIN_ID, "📢 أرسل الرسالة التي تريد إرسالها لجميع المستخدمين:")
+        bot.register_next_step_handler(call.message, admin_broadcast)
 
     elif call.data == "set_channel":
         bot.send_message(ADMIN_ID, "🔗 أدخل معرف القناة للاشتراك الإجباري:")
@@ -600,15 +836,16 @@ def handle_admin_buttons(call):
     elif call.data == "toggle_notifications":
         global NOTIFICATIONS_ENABLED
         NOTIFICATIONS_ENABLED = not NOTIFICATIONS_ENABLED
-        bot.answer_callback_query(call.id, f"🔄 إشعارات الدخول {'مفعل' if NOTIFICATIONS_ENABLED else 'موقوف'}.")
+        status = "✅ مفعّل" if NOTIFICATIONS_ENABLED else "❌ معطّل"
+        bot.answer_callback_query(call.id, f"🔄 إشعارات الدخول الآن: {status}")
+        bot.send_message(ADMIN_ID, f"🔄 إشعارات الدخول الآن: {status}")
 
     elif call.data == "toggle_bot":
         global BOT_ACTIVE
         BOT_ACTIVE = not BOT_ACTIVE
         status = "✅ يعمل الآن" if BOT_ACTIVE else "⏸ متوقف مؤقتًا"
         bot.answer_callback_query(call.id, f"🚫 حالة البوت: {status}")
-        if not BOT_ACTIVE:
-            bot.send_message(ADMIN_ID, "⚠️ البوت متوقف مؤقتًا.")
+        bot.send_message(ADMIN_ID, f"🚫 حالة البوت: {status}")
 
     elif call.data == "edit_game_settings":
         bot.send_message(ADMIN_ID, "🛠 أدخل الإعدادات الجديدة للعبة (الصيغة: game_name entry win loss):")
@@ -639,18 +876,33 @@ def handle_admin_buttons(call):
 def admin_broadcast(message):
     cursor.execute("SELECT id FROM users")
     users = cursor.fetchall()
+    
+    success_count = 0
+    failed_count = 0
+
     for user in users:
         try:
-            bot.send_message(user[0], f"📢 رسالة إدارية:\n{message.text}")
+            bot.send_message(user[0], f"رسالة من المطور🧑‍💻\n{message.text}")
+            success_count += 1
         except Exception:
+            failed_count += 1
             continue
-    bot.send_message(ADMIN_ID, "✅ تمت الإذاعة لجميع المستخدمين.")
+    
+    bot.send_message(ADMIN_ID, f"✅ تمت الإذاعة لـ {success_count} مستخدم.\n⚠️ فشل الإرسال لـ {failed_count} مستخدم.")
 
 def admin_add_points_handler(message):
     try:
         user_id, pts = map(int, message.text.split())
+        
+        # إضافة النقاط إلى المستخدم
         add_points(user_id, pts)
-        bot.send_message(ADMIN_ID, f"✅ تمت إضافة {pts} نقطة للمستخدم {user_id}.")
+        
+        # إرسال تأكيد إلى الأدمن
+        bot.send_message(ADMIN_ID, f"✅ تمت إضافة {pts} نقطة للمستخدم {user_id} بنجاح.")
+        
+        # إشعار المستخدم بالنقاط المضافة
+        bot.send_message(user_id, f"🎉 تم إضافة {pts} نقطة إلى رصيدك بواسطة المطور! شكرًا لاستخدامك البوت. 😊")
+    
     except Exception:
         bot.send_message(ADMIN_ID, "❌ صيغة غير صحيحة. استخدم: user_id points")
 
@@ -662,18 +914,32 @@ def admin_remove_points_handler(message):
     except Exception:
         bot.send_message(ADMIN_ID, "❌ صيغة غير صحيحة. استخدم: user_id points")
 
-def admin_edit_game(message):
+def add_daily_task(message):
     try:
-        _, game_name, entry, win, loss = message.text.split()
-        if game_name in GAME_SETTINGS:
-            GAME_SETTINGS[game_name]["entry"] = int(entry)
-            GAME_SETTINGS[game_name]["win"] = int(win)
-            GAME_SETTINGS[game_name]["loss"] = int(loss)
-            bot.send_message(ADMIN_ID, f"✅ تم تعديل إعدادات {game_name}:\nدخول: {entry}, ربح: {win}, خسارة: {loss}")
-        else:
-            bot.send_message(ADMIN_ID, "❌ اسم اللعبة غير موجود.")
+        task_data = message.text.split("|")
+        if len(task_data) != 2:
+            bot.send_message(ADMIN_ID, "❌ الصيغة غير صحيحة! استخدم: المهمة | عدد النقاط")
+            return
+        
+        task_text = task_data[0].strip()
+        task_points = int(task_data[1].strip())
+
+        cursor.execute("INSERT INTO daily_tasks (task, points) VALUES (?, ?)", (task_text, task_points))
+        conn.commit()
+
+        bot.send_message(ADMIN_ID, f"✅ تمت إضافة المهمة اليومية: {task_text} ({task_points} نقطة)")
+    
+    except ValueError:
+        bot.send_message(ADMIN_ID, "❌ عدد النقاط يجب أن يكون رقمًا صحيحًا!")
+
+def admin_remove_points_handler(message):
+    try:
+        user_id, pts = map(int, message.text.split())
+        remove_points(user_id, pts)
+        bot.send_message(ADMIN_ID, f"✅ تم خصم {pts} نقطة من المستخدم {user_id}.")
+        bot.send_message(user_id, f"⚠️ تم خصم {pts} نقطة من رصيدك بواسطة الأدمن.")
     except Exception:
-        bot.send_message(ADMIN_ID, "❌ صيغة غير صحيحة. استخدم: /edit_game game_name entry win loss")
+        bot.send_message(ADMIN_ID, "❌ صيغة غير صحيحة. استخدم: user_id points")
 
 def admin_edit_game_prices(message):
     try:
@@ -687,6 +953,37 @@ def admin_edit_game_prices(message):
             bot.send_message(ADMIN_ID, "❌ اسم اللعبة غير صحيح.")
     except Exception:
         bot.send_message(ADMIN_ID, "❌ صيغة غير صحيحة. استخدم: game_name new_entry_cost")
+
+def admin_add_points_all(message):
+    try:
+        amount = int(message.text)
+        if amount <= 0:
+            bot.send_message(ADMIN_ID, "❌ يجب أن يكون العدد أكبر من 0!")
+            return
+
+        cursor.execute("UPDATE users SET points = points + ?", (amount,))
+        conn.commit()
+        
+        bot.send_message(ADMIN_ID, f"✅ تم إضافة {amount} نقطة لجميع المستخدمين.")
+    
+    except ValueError:
+        bot.send_message(ADMIN_ID, "⚠️ يرجى إدخال رقم صحيح.")
+
+def admin_remove_points_all(message):
+    try:
+        amount = int(message.text)
+        if amount <= 0:
+            bot.send_message(ADMIN_ID, "❌ يجب أن يكون العدد أكبر من 0!")
+            return
+
+        # التأكد من عدم تقليل الرصيد لأقل من الصفر
+        cursor.execute("UPDATE users SET points = CASE WHEN points >= ? THEN points - ? ELSE 0 END", (amount, amount))
+        conn.commit()
+
+        bot.send_message(ADMIN_ID, f"✅ تم خصم {amount} نقطة من جميع المستخدمين.")
+    
+    except ValueError:
+        bot.send_message(ADMIN_ID, "⚠️ يرجى إدخال رقم صحيح.")
 
 def admin_edit_game_points(message):
     try:
@@ -729,6 +1026,26 @@ def set_invite_points_handler(message):
         bot.send_message(ADMIN_ID, f"✅ تم تعيين نقاط الدعوة إلى {INVITE_POINTS} نقطة.")
     except ValueError:
         bot.send_message(ADMIN_ID, "⚠️ يرجى إدخال رقم صحيح.")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("send_points:"))
+def send_points_handler(call):
+    admin_id = call.from_user.id
+    if admin_id != ADMIN_ID:
+        bot.answer_callback_query(call.id, "❌ ليس لديك صلاحيات للرد على هذا الطلب.")
+        return
+
+    user_id = call.data.split(":")[1]  
+    bot.send_message(admin_id, f"📩 أرسل رابط النقاط للمستخدم: [اضغط هنا](tg://user?id={user_id})", parse_mode="Markdown")
+    bot.register_next_step_handler_by_chat_id(admin_id, lambda message: forward_points_link(message, user_id))
+
+def forward_points_link(message, user_id):
+    admin_id = message.chat.id
+    if admin_id != ADMIN_ID:
+        return
+
+    points_link = message.text  
+    bot.send_message(user_id, f"🔗 رابط استلام النقاط:\n{points_link}")
+    bot.send_message(admin_id, "✅ تم إرسال رابط النقاط بنجاح!")
 
 # ===================== تشغيل البوت =====================
 while True:
