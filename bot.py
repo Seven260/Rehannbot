@@ -190,6 +190,7 @@ def get_admin_menu():
         InlineKeyboardButton("❌ خصم نقاط", callback_data="admin_remove_points"),
         InlineKeyboardButton("⏳ تعديل وقت اختبار الذاكرة", callback_data="set_memory_time"),
         InlineKeyboardButton("🔗 تعيين قناة اشتراك", callback_data="set_channel"),
+        InlineKeyboardButton("📋 معلومات المستخدم", callback_data="get_user_info")
     )
     markup.add(
         InlineKeyboardButton("⚙ تعديل رسالة الترحيب", callback_data="edit_welcome"),
@@ -508,45 +509,53 @@ def process_transfer(message):
 @bot.message_handler(func=lambda message: message.text == "💳 سحب النقاط")
 def withdraw_points(message):
     user_id = message.chat.id
-
-    # التحقق من رصيد المستخدم
     cursor.execute("SELECT points FROM users WHERE id=?", (user_id,))
     row = cursor.fetchone()
 
-    if not row or row[0] < 1:
+    if not row or row[0] < 10:
         bot.send_message(user_id, "❌ ليس لديك نقاط كافية للسحب.")
         return
 
     user_points = row[0]
+    markup = InlineKeyboardMarkup()
+    markup.add(InlineKeyboardButton("❌ إلغاء العملية", callback_data="cancel_withdraw"))
+    
+    memory_games[user_id] = {"stage": "withdraw"}  # تحديد المرحلة
     msg = bot.send_message(
         user_id, 
         f"💰 لديك {user_points} نقطة.\n"
         "🔢 أدخل عدد النقاط التي ترغب في سحبها.\n"
         "📢 ملاحظة: كل 10 نقاط في هذا البوت = 100 نقطة في بوت التمويل!\n"
         "📌 مثال: 100",
-        parse_mode="Markdown"
+        parse_mode="Markdown",
+        reply_markup=markup
     )
     bot.register_next_step_handler(msg, ask_bot_username)
 
 def ask_bot_username(message):
     user_id = message.chat.id
-
+    if user_id not in memory_games or memory_games[user_id].get("stage") != "withdraw":
+        return  # المستخدم ألغى العملية، لا تفعل شيئًا
+    
     try:
         amount = int(message.text)
-        if amount <= 0:
-            bot.send_message(user_id, "❌ يجب أن يكون المبلغ أكبر من 0.")
+        if amount < 100 or amount % 100 != 0:
+            bot.send_message(user_id, "❌ يجب أن يكون المبلغ مضاعفًا لـ 100.")
             bot.register_next_step_handler(message, ask_bot_username)
             return
 
         cursor.execute("SELECT points FROM users WHERE id=?", (user_id,))
         row = cursor.fetchone()
-        if not row or row[0] < amount:
+        if not row or row[0] < (amount // 100) * 10:
             bot.send_message(user_id, "❌ ليس لديك نقاط كافية للسحب.")
             bot.register_next_step_handler(message, ask_bot_username)
             return
 
-        deducted_amount = amount // 10
-        memory_games[user_id] = {"amount": amount, "deducted": deducted_amount}
+        deducted_amount = (amount // 100) * 10
+        memory_games[user_id] = {"stage": "process", "amount": amount, "deducted": deducted_amount}
+
+        markup = InlineKeyboardMarkup()
+        markup.add(InlineKeyboardButton("❌ إلغاء العملية", callback_data="cancel_withdraw"))
 
         msg = bot.send_message(
             user_id, 
@@ -554,7 +563,8 @@ def ask_bot_username(message):
             "🤖 أدخل يوزر البوت المراد السحب منه:\n"
             "✅ البوتات المسموح السحب منها:\n"
             "- @yynnurybot\n- @MHDN313bot\n- @srwry2bot",
-            parse_mode="Markdown"
+            parse_mode="Markdown",
+            reply_markup=markup
         )
         bot.register_next_step_handler(msg, process_withdrawal)
 
@@ -564,9 +574,11 @@ def ask_bot_username(message):
 
 def process_withdrawal(message):  
     user_id = message.chat.id
-    bot_username = message.text.strip().lower()
+    if user_id not in memory_games or memory_games[user_id].get("stage") != "process":
+        return  # المستخدم ألغى العملية، لا تفعل شيئًا
 
-    allowed_bots = ["@yynnurybot", "@MHDN313bot", "@srwry2bot"]
+    bot_username = message.text.strip().lower().lstrip('@')  # إزالة @ وجعل الحروف صغيرة
+    allowed_bots = ["yynnurybot", "mhdn313bot", "srwry2bot"]  # بدون @ للمقارنة الصحيحة
 
     if bot_username not in allowed_bots:
         msg = bot.send_message(user_id, "❌ البوت الذي أدخلته غير مسموح السحب منه.\n💬 تواصل مع المطور أو أدخل يوزر بوت آخر:")
@@ -579,7 +591,6 @@ def process_withdrawal(message):
     cursor.execute("UPDATE users SET points = points - ? WHERE id=?", (deducted_amount, user_id))
     conn.commit()
 
-    # ✅ إرسال إشعار للأدمن مع زر شفاف للرد
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("📩 إرسال رابط النقاط", callback_data=f"send_points:{user_id}"))
 
@@ -589,11 +600,12 @@ def process_withdrawal(message):
         f"👤 المستخدم: @{message.from_user.username if message.from_user.username else 'لا يوجد يوزر'}\n"
         f"💰 النقاط المطلوبة: {amount} نقطة\n"
         f"❌ النقاط التي تم خصمها: {deducted_amount} نقطة\n"
-        f"🤖 البوت المطلوب السحب منه: {bot_username}",
+        f"🤖 البوت المطلوب السحب منه: @{bot_username}",  # إعادة إضافة @ للإرسال
         reply_markup=markup
     )
 
     bot.send_message(user_id, "✅ تم خصم النقاط من رصيدك.\n⏳ عندما يكون المطور متصلًا بالإنترنت، سيتم إرسال رابط النقاط إليك.")
+    del memory_games[user_id]  # إزالة بيانات المستخدم بعد إتمام السحب
 
 @bot.message_handler(func=lambda message: message.text == "📅 المهام اليومية")
 def show_daily_tasks(message):
@@ -1036,6 +1048,63 @@ def set_invite_points_handler(message):
         bot.send_message(ADMIN_ID, f"✅ تم تعيين نقاط الدعوة إلى {INVITE_POINTS} نقطة.")
     except ValueError:
         bot.send_message(ADMIN_ID, "⚠️ يرجى إدخال رقم صحيح.")
+
+@bot.callback_query_handler(func=lambda call: call.data == "get_user_info")
+def request_user_info(call):
+    bot.send_message(call.message.chat.id, "🔍 يرجى إرسال معرف المستخدم أو اليوزر:")
+    bot.register_next_step_handler(call.message, send_user_info)
+
+def send_user_info(message):
+    user_input = message.text.strip()
+
+    try:
+        # تحديد المستخدم عن طريق ID أو Username
+        if user_input.isdigit():
+            user_id = int(user_input)
+            user = bot.get_chat(user_id)
+        else:
+            user = bot.get_chat(user_input)
+            user_id = user.id
+
+        # الحصول على معلومات إضافية
+        chat_member = bot.get_chat_member(user_id, user_id)
+        status = chat_member.status  # حالة المستخدم (عضو، مسؤول، محظور، إلخ.)
+
+        # بيانات المستخدم
+        username = user.username if user.username else "غير متوفر"
+        bio = user.bio if hasattr(user, 'bio') else "غير متوفر"
+        is_banned = "محظور" if status == "kicked" or status == "banned" else "غير محظور"
+        is_active = "نشط" if status in ["member", "administrator", "creator"] else "غير نشط"
+
+        # البيانات الإضافية (يجب استبدالها من قاعدة البيانات الخاصة بك)
+        points = 0  # مثال: جلب النقاط من قاعدة البيانات
+        transfers = 0
+        gifts = 0
+        purchases = 0
+        shares = 0
+        used_points = 0
+
+        # تجهيز رسالة المعلومات
+        info = (
+            f"👤| اسم المستخدم : {user.first_name} {user.last_name or ''}\n"
+            f"ℹ️| معرف المستخدم : {user_id}\n"
+            f"📍| اليوزر: @{username}\n"
+            f"🏵| السيرة الذاتية : {bio}\n"
+            f"🌀| حالة المستخدم : {is_banned}\n"
+            f"🎗| حالة عمل البوت مع المستخدم : {is_active}\n"
+            f"🚸| عدد نقاط المستخدم : {points}\n\n"
+            f"🌀| مزيد من المعلومات عن المستخدم :\n"
+            f"- عدد عمليات التحويل التي قام بها : {transfers}\n"
+            f"- عدد الهدايا اليومية التي جمعها : {gifts}\n"
+            f"- عدد السلع التي تم شراؤها : {purchases}\n"
+            f"- عدد المشاركات لرابط الدعوة : {shares}\n"
+            f"- عدد النقاط التي تم استخدامها : {used_points}\n"
+        )
+
+        bot.send_message(message.chat.id, info)
+
+    except Exception as e:
+        bot.send_message(message.chat.id, "⚠️ لم يتم العثور على المستخدم، تأكد من صحة الإدخال.")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("send_points:"))
 def send_points_handler(call):
