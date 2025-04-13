@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw, ImageFont
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
 # إعدادات البوت
-TOKEN = "7384344681:AAHQvoGlwyX3D9VNXMwayi4qcWa4AgCzpDM"  # ضع توكن البوت الصحيح هنا
+TOKEN = "7984622218:AAEhjLtLp2WFWLdYxcVxmxW-AQAf4nKShiI"  # ضع توكن البوت الصحيح هنا
 ADMIN_ID = 7347225275      # ضع معرف الأدمن الصحيح هنا
 SUPPORT_LINK = "https://t.me/Vuvuvuuu_bot"  # رابط الدعم لشحن الرصيد
 
