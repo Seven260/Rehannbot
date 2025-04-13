@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw, ImageFont
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
 # إعدادات البوت
-TOKEN = "7984622218:AAEhjLtLp2WFWLdYxcVxmxW-AQAf4nKShiI"  # ضع توكن البوت الصحيح هنا
+TOKEN = "7626422830:AAE4cfe92yeaXDE60NvZk1ABBdTAnE0zc0I"  # ضع توكن البوت الصحيح هنا
 ADMIN_ID = 7347225275      # ضع معرف الأدمن الصحيح هنا
 SUPPORT_LINK = "https://t.me/Vuvuvuuu_bot"  # رابط الدعم لشحن الرصيد
 
@@ -331,17 +331,6 @@ def back_to_admin(call):
         message_id=call.message.message_id,
         reply_markup=get_admin_menu()  # تأكد من أنك تستخدم لوحة الأدمن هنا
     )
-
-@bot.message_handler(func=lambda message: True)  # أو استخدم التابع المناسب للأزرار
-def handle_buttons(message):
-    user_id = message.chat.id
-    
-    # التحقق من الاشتراك في القناة قبل تنفيذ أي عملية
-    for channel in REQUIRED_CHANNELS:  # تأكد من فحص جميع القنوات
-        if not is_subscribed(user_id, channel):
-            # إذا لم يكن مشتركًا، أرسل له رسالة الاشتراك
-            bot.send_message(user_id, f"🚸| عذراً عزيزي .🔰| عليك الاشتراك في قناة البوت لتتمكن من استخدامه\n\n- https://t.me/{channel[1:]}\n\n‼️| اشترك ثم ارسل /start")
-            return
 
 @bot.message_handler(func=lambda m: m.text == "💳 شحن الرصيد")
 def charge_points(message):
