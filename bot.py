@@ -15,6 +15,7 @@ SUPPORT_LINK = "https://t.me/Vuvuvuuu_bot"  # رابط الدعم لشحن ال�
 
 # إعدادات الدعوات
 INVITE_ENABLED = True  # تفعيل أو تعطيل نظام الدعوات
+# إنشاء كائن اللعبة
 # تعريف القنوات المطلوبة
 REQUIRED_CHANNELS = ["@ee44e4e","@Se_v_e_n7","@ZD_66","@S_0_P_E_R"]
 broadcasting_active = False  # بداية الإذاعة متوقفة
@@ -141,6 +142,7 @@ button_names = {
     "trivia": "❓ أسئلة عامة",
     "wheel": "🎡 عجلة الحظ",
     "memory": "🧠 اختبار الذاكرة",
+    "plane": "✈️ لعبة الطيارة",
     "balance": "💰 معرفة الرصيد",
     "referral": "🎟 دعوة الأصدقاء",
     "sh_charge": "💳 شحن الرصيد",
@@ -332,6 +334,70 @@ def back_to_admin(call):
         reply_markup=get_admin_menu()  # تأكد من أنك تستخدم لوحة الأدمن هنا
     )
 
+@bot.message_handler(commands=['add'])
+def add_or_subtract_points(message):
+    try:
+        # استخراج user_id و points من النص
+        args = message.text.split()
+        
+        if len(args) != 3:
+            bot.send_message(message.chat.id, "❌ الصيغة غير صحيحة. استخدم: /add <user_id> <points>")
+            return
+        
+        user_id = int(args[1])
+        points = int(args[2])
+        
+        # تحقق إذا كان المستخدم قد أرسل رقم النقاط بشكل صحيح
+        if points == 0:
+            bot.send_message(message.chat.id, "❌ النقاط يجب أن تكون عددًا غير صفر.")
+            return
+        
+        # إضافة أو خصم النقاط حسب القيمة
+        if points > 0:
+            # إضافة النقاط
+            add_points(user_id, points)
+            bot.send_message(message.chat.id, f"✅ تم إضافة {points} نقطة للمستخدم {user_id}.")
+        else:
+            # خصم النقاط
+            subtract_points(user_id, abs(points))
+            bot.send_message(message.chat.id, f"✅ تم خصم {abs(points)} نقطة من المستخدم {user_id}.")
+        
+        # إشعار المستخدم بالنقاط المضافة أو المخصومة
+        bot.send_message(user_id, f"📬 تم {('إضافة' if points > 0 else 'خصم')} {abs(points)} نقطة من رصيدك.")
+    
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ حدث خطأ: {str(e)}")
+
+# دالة لإضافة النقاط
+def add_points(user_id, points):
+    if user_id not in users_points:
+        users_points[user_id] = 0
+    users_points[user_id] += points
+
+# دالة لخصم النقاط
+def subtract_points(user_id, points):
+    if user_id not in users_points or users_points[user_id] < points:
+        bot.send_message(user_id, "❌ ليس لديك نقاط كافية.")
+        return
+    users_points[user_id] -= points
+
+@bot.message_handler(func=lambda m: m.text == "🎟 دعوة الأصدقاء")
+def invite_friends(message):
+    user_id = message.chat.id  # ✅ تعريف user_id في البداية
+
+    if not BOT_ACTIVE:
+        bot.send_message(user_id, "⚠️ البوت متوقف حاليًا، لا يمكنك دعوة الأصدقاء الآن.")
+        return
+
+    invite_link = f"https://t.me/{bot.get_me().username}?start={user_id}"
+
+    # جلب عدد الدعوات من قاعدة البيانات
+    cursor.execute("SELECT invites FROM users WHERE id=?", (user_id,))
+    row = cursor.fetchone()
+    user_invites = row[0] if row else 0  # إذا لم يكن هناك سجل، افتراضيًا 0
+    invite_link = f"https://t.me/{bot.get_me().username}?start={user_id}"
+    bot.send_message(user_id, f"انسخ الرابط ثم قم بمشاركته مع اصدقائك 📥 .\n\n • كل شخص يقوم بالدخول ستحصل على {INVITE_POINTS} 💲\n\n  بإمكانك عمل اعلان خاص برابط الدعوة الخاص بك\n\n ~ رابط الدعوة :{invite_link}\n\n• مشاركتك للرابط : {user_invites} 🌀", parse_mode="Markdown")
+
 @bot.message_handler(func=lambda m: m.text == "💳 شحن الرصيد")
 def charge_points(message):
     user_id = message.chat.id  # ✅ تعريف user_id في بداية الدالة
@@ -372,36 +438,67 @@ def charge_points(message):
 def show_games(message):
     bot.send_message(message.chat.id, "🎮 اختر لعبة:", reply_markup=get_games_menu())
 
-@bot.message_handler(commands=['plane'])
+# دالة لإظهار زر "سحب النقاط"
+def get_plane_game_markup():
+    markup = InlineKeyboardMarkup()
+    cashout_button = InlineKeyboardButton("💸 سحب النقاط", callback_data="cashout_plane")
+    markup.add(cashout_button)
+    return markup
+
+# الدالة التي تبدأ لعبة الطيارة
+@bot.message_handler(func=lambda m: m.text == "✈️ لعبة الطيارة")
 def start_plane(message):
-    if game.running:
-        return bot.send_message(message.chat.id, "🚀 الطيارة تحلق بالفعل!")
+    user_id = message.chat.id
+    # فحص الاشتراك في القنوات
+    for channel in REQUIRED_CHANNELS:
+        if not is_subscribed(user_id, channel):
+            return bot.send_message(user_id, f"🚸| عذراً عزيزي، عليك الاشتراك في القناة لتتمكن من لعب لعبة الطيارة.\n\n- {channel}")
     
-    bot.send_message(message.chat.id, "⌛️ الطيارة ستقلع بعد 3 ثوانٍ! استخدم /join_plane [المبلغ] للانضمام.")
+    if game.is_game_running():  # استخدام الدالة الجديدة
+        return bot.send_message(message.chat.id, "🚀 - تحلق بالفعل! لا يمكن بدء جولة جديدة الآن.")
     
-    def launch_game():
-        game.start_game()
-        bot.send_message(message.chat.id, f"🔥 الطائرة انطلقت! المضاعف الآن {game.multiplier}x")
+    # طلب عدد النقاط التي يرغب في الرهان بها
+    bot.send_message(message.chat.id, "⌛️ الطيارة ستقلع بعد 3 ثوانٍ! من فضلك، اختر عدد النقاط التي تريد الرهان بها (أرسل الرقم فقط):")
     
-    threading.Thread(target=launch_game).start()
+    # تعيين حالة لانتظار المبلغ
+    bot.register_next_step_handler(message, ask_for_bet)
 
-@bot.message_handler(commands=['join_plane'])
-def join_plane(message):
-    parts = message.text.split()
-    if len(parts) < 2:
-        return bot.send_message(message.chat.id, "❌ استخدم: /join_plane [الرهان]")
-    bet = int(parts[1])
-    bot.send_message(message.chat.id, game.join_game(message.chat.id, bet))
+def ask_for_bet(message):
+    user_id = message.chat.id
+    try:
+        bet = int(message.text)  # محاولة تحويل المدخل إلى عدد صحيح
+        if bet <= 0:
+            bot.send_message(message.chat.id, "❌ المبلغ يجب أن يكون أكبر من 0!")
+            return
+        if bet > users_points.get(user_id, 0):
+            bot.send_message(message.chat.id, "❌ ليس لديك نقاط كافية للرهان!")
+            return
 
-@bot.message_handler(commands=['cashout_plane'])
-def cashout_plane(message):
-    bot.send_message(message.chat.id, game.cashout(message.chat.id))
+        # خصم النقاط من رصيد اللاعب
+        users_points[user_id] -= bet
+        game.start_game(user_id, bet)  # بدء اللعبة بعد تحديد الرهان
+        bot.send_message(message.chat.id, f"🔥 الطائرة انطلقت! المضاعف الآن {game.multiplier}x", reply_markup=get_plane_game_markup())
+    except ValueError:
+        bot.send_message(message.chat.id, "❌ من فضلك، أرسل عددًا صحيحًا للرهان.")
 
-@bot.message_handler(commands=['stop_plane'])
-def stop_plane(message):
-    if message.chat.id != ADMIN_ID:
-        return
-    bot.send_message(message.chat.id, f"🛑 توقفت اللعبة! المضاعف: {game.stop_game()}x")
+# الدالة لسحب النقاط
+@bot.callback_query_handler(func=lambda call: call.data == "cashout_plane")
+def cashout_plane(call):
+    user_id = call.message.chat.id
+    result = game.cashout(user_id)
+    bot.send_message(user_id, result)
+    # إيقاف اللعبة بعد سحب النقاط
+    game.stop_game()
+    bot.edit_message_text("⚡️ تم سحب النقاط بنجاح!", chat_id=user_id, message_id=call.message.message_id)
+
+@bot.message_handler(commands=['add_points'])
+def add_points(message):
+    user_id = message.chat.id
+    points = int(message.text.split()[1])
+    if user_id not in users_points:
+        users_points[user_id] = 0
+    users_points[user_id] += points
+    bot.send_message(user_id, f"✅ تم إضافة {points} نقطة. رصيدك الحالي: {users_points[user_id]} نقطة.")
 
 @bot.message_handler(func=lambda m: m.text == "🏆 تخمين مكان الكرة")
 def play_guess_ball(message):
@@ -552,7 +649,7 @@ def show_balance(message):
 def transfer_points(message):
 
     if not BOT_ACTIVE:
-        bot.send_message(user_id, "⚠️ البوت متوقف حاليًا، لا يمكنك دعوة الأصدقاء الآن.")
+        bot.send_message(message.chat.id, "⚠️ البوت متوقف حاليًا، لا يمكنك دعوة الأصدقاء الآن.")
         return
 
     bot.send_message(message.chat.id, "🔢 أرسل معرف المستخدم والمبلغ المراد تحويله بالشكل التالي:\n`user_id amount`", parse_mode="Markdown")
@@ -599,11 +696,16 @@ def withdraw_points(message):
     cursor.execute("SELECT points FROM users WHERE id=?", (user_id,))
     row = cursor.fetchone()
 
+    if not row:
+        bot.send_message(user_id, "❌ لا توجد بيانات لهذا المستخدم في قاعدة البيانات.")
+        return
+    
+    user_points = row[0]
+    
     if not BOT_ACTIVE:
         bot.send_message(user_id, "⚠️ البوت متوقف حاليًا، لا يمكنك دعوة الأصدقاء الآن.")
         return
 
-    user_points = row[0]
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("❌ إلغاء العملية", callback_data="cancel_withdraw"))
     
@@ -649,7 +751,7 @@ def ask_bot_username(message):
             f"📢 سيتم خصم **{deducted_amount} نقطة** من رصيدك.\n"
             "🤖 أدخل يوزر البوت المراد السحب منه:\n"
             "✅ البوتات المسموح السحب منها:\n"
-            "- @yynnurybot\n- @MHDN313bot\n- @srwry2bot",
+            "- @yynnurybot\n- @mhdn313bot\n- @srwry2bot",
             parse_mode="Markdown",
             reply_markup=markup
         )
@@ -665,7 +767,9 @@ def process_withdrawal(message):
         return  # المستخدم ألغى العملية، لا تفعل شيئًا
 
     bot_username = message.text.strip().lower()
-    allowed_bots = ["@yynnurybot", "@MHDN313bot", "@srwry2bot"]
+    print(f"تم إدخال البوت: {bot_username}")  # طباعة اسم البوت المدخل
+    allowed_bots = ["@yynnurybot", "@mhdn313bot", "@srwry2bot"]
+    
     if bot_username not in allowed_bots:
         msg = bot.send_message(user_id, "❌ البوت الذي أدخلته غير مسموح السحب منه.\n💬 تواصل مع المطور أو أدخل يوزر بوت آخر:")
         bot.register_next_step_handler(msg, process_withdrawal)
@@ -938,8 +1042,8 @@ def handle_admin_buttons(call):
         bot.answer_callback_query(call.id, "❌ ليس لديك صلاحيات!")
         return
 
-    if call.data == "admin_add_points":
-        bot.send_message(ADMIN_ID, "💰 أدخل معرف المستخدم وعدد النقاط للإضافة (مثال: 123456 50):")
+    elif call.data == "admin_add_points":  # ✅ إضافة نقاط للجميع
+        bot.send_message(ADMIN_ID, "💰 أدخل معرف المستخدم وعدد النقاط للإضافة مثال: 123456 50:")
         bot.register_next_step_handler(call.message, admin_add_points_handler)
 
     elif call.data == "admin_remove_points":
@@ -1026,9 +1130,20 @@ def admin_broadcast(message):
             continue
     
     bot.send_message(ADMIN_ID, f"✅ تمت الإذاعة لـ {success_count} مستخدم.\n⚠️ فشل الإرسال لـ {failed_count} مستخدم.")
+# إضافة النقاط للمستخدم
+def add_points(user_id, points):
+    cursor.execute("UPDATE users SET points = points + ? WHERE id=?", (points, user_id))
+    conn.commit()
 
+# خصم النقاط من المستخدم
+def remove_points(user_id, points):
+    cursor.execute("UPDATE users SET points = points - ? WHERE id=?", (points, user_id))
+    conn.commit()
+
+# دالة معالجة إضافة النقاط
 def admin_add_points_handler(message):
     try:
+        # فصل المعرف والنقاط
         user_id, pts = map(int, message.text.split())
         
         # إضافة النقاط إلى المستخدم
@@ -1041,6 +1156,7 @@ def admin_add_points_handler(message):
         bot.send_message(user_id, f"🎉 تم إضافة {pts} نقطة إلى رصيدك بواسطة المطور! شكرًا لاستخدامك البوت. 😊")
     
     except Exception:
+        # إذا كانت الصيغة غير صحيحة
         bot.send_message(ADMIN_ID, "❌ صيغة غير صحيحة. استخدم: user_id points")
 
 def process_user_info(message):
@@ -1268,16 +1384,21 @@ class PlaneGame:
     def __init__(self):
         self.running = False
         self.multiplier = 1.0
-        self.players = {}
+        self.players = {}  # يحتوي على اللاعبين مع رهاناتهم
 
-    def start_game(self):
+    def start_game(self, user_id, bet):
         if self.running:
             return "🚨 اللعبة قيد التشغيل!"
+        
         self.running = True
         self.multiplier = 1.0
-        self.players = {}
-        time.sleep(3)  # تأخير قبل الإقلاع
+        self.players = {user_id: bet}
+        
+        # تأخير قبل الإقلاع
+        time.sleep(3)  
+        
         while self.running:
+            # زيادة المضاعف بشكل تدريجي
             self.multiplier += 0.1
             time.sleep(1)
 
@@ -1295,12 +1416,24 @@ class PlaneGame:
 
     def cashout(self, user_id):
         if user_id not in self.players:
-            return "❌ لم تشارك!"
+            return "❌ لم تشارك في اللعبة!"
+        
         bet = self.players.pop(user_id)
         winnings = bet * self.multiplier
-        return f"💰 ربحت {winnings} نقطة!"
+        # إضافة النقاط إلى المستخدم
+        users_points[user_id] += winnings
+        return f"💰 ربحت {winnings} نقطة! النقاط الإجمالية: {users_points[user_id]}"
 
+    def is_game_running(self):
+        return self.running  # التحقق إذا كانت اللعبة جارية أم لا
+
+# تخزين النقاط لكل مستخدم
+users_points = {}
+
+# إنشاء اللعبة
 game = PlaneGame()
+
+# باقي الكود الخاص بالتفاعل مع البوت...
 
 @bot.callback_query_handler(func=lambda call: call.data == "backup_menu")
 def show_backup_menu(call):
