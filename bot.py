@@ -5,6 +5,8 @@ import time
 import threading
 import os
 import json
+import telebot
+from telebot import types
 from PIL import Image, ImageDraw, ImageFont
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 
@@ -438,65 +440,73 @@ def charge_points(message):
 def show_games(message):
     bot.send_message(message.chat.id, "🎮 اختر لعبة:", reply_markup=get_games_menu())
 
-# دالة لإظهار زر "سحب النقاط"
-def get_plane_game_markup():
-    markup = InlineKeyboardMarkup()
-    cashout_button = InlineKeyboardButton("💸 سحب النقاط", callback_data="cashout_plane")
-    markup.add(cashout_button)
-    return markup
-
 # الدالة التي تبدأ لعبة الطيارة
 @bot.message_handler(func=lambda m: m.text == "✈️ لعبة الطيارة")
 def start_plane(message):
     user_id = message.chat.id
+
     # فحص الاشتراك في القنوات
     for channel in REQUIRED_CHANNELS:
         if not is_subscribed(user_id, channel):
             return bot.send_message(user_id, f"🚸| عذراً عزيزي، عليك الاشتراك في القناة لتتمكن من لعب لعبة الطيارة.\n\n- {channel}")
-    
-    if game.is_game_running():  # استخدام الدالة الجديدة
+
+    if user_id in plane_game.active_games and plane_game.active_games[user_id]['running']:
         return bot.send_message(message.chat.id, "🚀 - تحلق بالفعل! لا يمكن بدء جولة جديدة الآن.")
-    
-    # طلب عدد النقاط التي يرغب في الرهان بها
+
     bot.send_message(message.chat.id, "⌛️ الطيارة ستقلع بعد 3 ثوانٍ! من فضلك، اختر عدد النقاط التي تريد الرهان بها (أرسل الرقم فقط):")
-    
-    # تعيين حالة لانتظار المبلغ
     bot.register_next_step_handler(message, ask_for_bet)
+
 
 def ask_for_bet(message):
     user_id = message.chat.id
     try:
-        bet = int(message.text)  # محاولة تحويل المدخل إلى عدد صحيح
+        # محاولة تحويل المدخلات إلى رقم
+        bet = int(message.text)
+
+        # استرجاع النقاط من قاعدة البيانات
+        cursor.execute("SELECT points FROM users WHERE id = ?", (user_id,))
+        result = cursor.fetchone()
+
+        # التحقق إذا كان هناك نقاط للمستخدم
+        current_points = result[0] if result else 0
+
         if bet <= 0:
-            bot.send_message(message.chat.id, "❌ المبلغ يجب أن يكون أكبر من 0!")
-            return
-        if bet > users_points.get(user_id, 0):
-            bot.send_message(message.chat.id, "❌ ليس لديك نقاط كافية للرهان!")
-            return
+            return bot.send_message(message.chat.id, "❌ المبلغ يجب أن يكون أكبر من 0!")
 
-        # خصم النقاط من رصيد اللاعب
-        users_points[user_id] -= bet
-        game.start_game(user_id, bet)  # بدء اللعبة بعد تحديد الرهان
-        bot.send_message(message.chat.id, f"🔥 الطائرة انطلقت! المضاعف الآن {game.multiplier}x", reply_markup=get_plane_game_markup())
+        if bet > current_points:
+            return bot.send_message(message.chat.id, f"❌ ليس لديك نقاط كافية! لديك فقط {current_points} نقطة.")
+
+        # خصم النقاط وتحديث الرصيد
+        new_points = current_points - bet
+        cursor.execute("UPDATE users SET points = ? WHERE id = ?", (new_points, user_id))
+        conn.commit()
+
+        # بدء اللعبة بعد الخصم
+        plane_game.start_game(bot, user_id, message.chat.id, bet)
+
     except ValueError:
-        bot.send_message(message.chat.id, "❌ من فضلك، أرسل عددًا صحيحًا للرهان.")
-
-# الدالة لسحب النقاط
-@bot.callback_query_handler(func=lambda call: call.data == "cashout_plane")
-def cashout_plane(call):
-    user_id = call.message.chat.id
-    result = game.cashout(user_id)
-    bot.send_message(user_id, result)
-    # إيقاف اللعبة بعد سحب النقاط
-    game.stop_game()
-    bot.edit_message_text("⚡️ تم سحب النقاط بنجاح!", chat_id=user_id, message_id=call.message.message_id)
+        return bot.send_message(message.chat.id, "❌ يجب أن تكون النقاط قيمة رقمية صحيحة!")
+    except Exception as e:
+        print(f"Error: {e}")
+        return bot.send_message(message.chat.id, "❌ حدث خطأ أثناء معالجة طلبك. حاول مرة أخرى لاحقًا.")
 
 @bot.message_handler(commands=['add_points'])
 def add_points(message):
     user_id = message.chat.id
-    points = int(message.text.split()[1])
+    
+    # التحقق من صحة المدخل
+    try:
+        points = int(message.text.split()[1])
+        if points <= 0:
+            bot.send_message(user_id, "❌ يجب أن يكون عدد النقاط أكبر من 0!")
+            return
+    except (IndexError, ValueError):
+        bot.send_message(user_id, "❌ من فضلك، أرسل عددًا صحيحًا بعد الأمر.\nمثال: /add_points 10")
+        return
+
     if user_id not in users_points:
         users_points[user_id] = 0
+
     users_points[user_id] += points
     bot.send_message(user_id, f"✅ تم إضافة {points} نقطة. رصيدك الحالي: {users_points[user_id]} نقطة.")
 
@@ -1382,58 +1392,169 @@ def forward_points_link(message, user_id):
 # ===================== لعبة الطيارة =====================
 class PlaneGame:
     def __init__(self):
-        self.running = False
-        self.multiplier = 1.0
-        self.players = {}  # يحتوي على اللاعبين مع رهاناتهم
+        self.active_games = {}  # user_id: game_data
 
-    def start_game(self, user_id, bet):
-        if self.running:
-            return "🚨 اللعبة قيد التشغيل!"
-        
-        self.running = True
-        self.multiplier = 1.0
-        self.players = {user_id: bet}
-        
-        # تأخير قبل الإقلاع
-        time.sleep(3)  
-        
-        while self.running:
-            # زيادة المضاعف بشكل تدريجي
-            self.multiplier += 0.1
-            time.sleep(1)
+    def get_plane_game_markup(self):
+        markup = telebot.types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.row(telebot.types.KeyboardButton("💸 سحب النقاط"))
+        return markup
 
-    def stop_game(self):
-        self.running = False
-        return self.multiplier
+    def start_game(self, bot, user_id, chat_id, bet):
+        if user_id in self.active_games:
+            return  # يوجد لعبة قيد التشغيل
 
-    def join_game(self, user_id, bet):
-        if not self.running:
-            return "🚫 لا توجد جولة نشطة!"
-        if user_id in self.players:
-            return "❌ أنت مشترك بالفعل!"
-        self.players[user_id] = bet
-        return "✅ تم الاشتراك!"
+        # إعداد لعبة جديدة
+        self.active_games[user_id] = {
+            'bet': bet,
+            'multiplier': 1.0,
+            'running': True,
+            'cashed_out': False,
+            'exploded': False,
+            'message_id': None,
+            'chat_id': chat_id,
+        }
 
-    def cashout(self, user_id):
-        if user_id not in self.players:
-            return "❌ لم تشارك في اللعبة!"
-        
-        bet = self.players.pop(user_id)
-        winnings = bet * self.multiplier
-        # إضافة النقاط إلى المستخدم
-        users_points[user_id] += winnings
-        return f"💰 ربحت {winnings} نقطة! النقاط الإجمالية: {users_points[user_id]}"
+        # توليد قيمة عشوائية للمضاعف بين 1.1 و 2.0
+        self.active_games[user_id]['explode_at'] = round(random.uniform(1.1, 2.0), 1)
 
-    def is_game_running(self):
-        return self.running  # التحقق إذا كانت اللعبة جارية أم لا
+        # توليد اقتراح عشوائي بناءً على المضاعف
+        random_prediction = f"اقتراح: الطيارة قد تنفجر عند {self.active_games[user_id]['explode_at']}x قريبًا!"
 
-# تخزين النقاط لكل مستخدم
-users_points = {}
+        markup = self.get_plane_game_markup()
 
-# إنشاء اللعبة
-game = PlaneGame()
+        try:
+            # إرسال الرسالة الأولية مع الاقتراح
+            msg = bot.send_message(chat_id, f"✈️ الطائرة أقلعت!\nالمضاعف الآن: 1.0x\n{random_prediction}", reply_markup=markup)
+            self.active_games[user_id]['message_id'] = msg.message_id
+            self.active_games[user_id]['prediction'] = random_prediction  # حفظ الاقتراح لاستخدامه لاحقًا
+        except Exception as e:
+            print(f"Error sending start message: {e}")
+            del self.active_games[user_id]
+            return
 
-# باقي الكود الخاص بالتفاعل مع البوت...
+        # بدء اللعبة في thread منفصل
+        threading.Thread(target=self._run_game, args=(bot, user_id)).start()
+
+    def _run_game(self, bot, user_id):
+        time.sleep(2)
+        game = self.active_games.get(user_id)
+        if not game:
+            return
+
+        if random.random() < 0.1:
+            self._explode(bot, user_id)
+            return
+
+        while game['running']:
+            time.sleep(5)
+            game = self.active_games.get(user_id)
+            if not game or game['exploded'] or game['cashed_out']:
+                break
+
+            game['multiplier'] = round(game['multiplier'] + 0.1, 1)
+
+            # استخدام نفس الاقتراح في كل الرسائل
+            prediction = game['prediction']
+
+            try:
+                bot.edit_message_text(
+                    chat_id=game['chat_id'],
+                    message_id=game['message_id'],
+                    text=f"✈️ الطائرة أقلعت!\nالمضاعف الآن: {game['multiplier']}x\n{prediction}",
+                    reply_markup=self.get_plane_game_markup()
+                )
+            except Exception as e:
+                print(f"Error updating message: {e}")
+                try:
+                    msg = bot.send_message(game['chat_id'], f"✈️ الطائرة أقلعت!\nالمضاعف الآن: {game['multiplier']}x\n{prediction}", reply_markup=self.get_plane_game_markup())
+                    game['message_id'] = msg.message_id
+                except Exception as e:
+                    print(f"Error sending message: {e}")
+                    break
+
+            if random.random() < 0.55:
+                self._explode(bot, user_id)
+                break  
+
+    def _explode(self, bot, user_id):  
+        game = self.active_games.get(user_id)  
+        if not game or game['exploded'] or game['cashed_out']:  
+            return  
+  
+        game['running'] = False  
+        game['exploded'] = True  
+  
+        try:  
+            bot.edit_message_text(  
+                chat_id=game['chat_id'],  
+                message_id=game['message_id'],  
+                text=f"💥 الطائرة انفجرت عند {game['multiplier']}x!",  
+                reply_markup=self.get_main_menu_markup()  # زر العودة للقائمة  
+            )  
+        except Exception as e:  
+            print(f"Error sending explosion message: {e}")  
+            bot.send_message(game['chat_id'], f"💥 الطائرة انفجرت عند {game['multiplier']}x!", reply_markup=self.get_main_menu_markup())  
+  
+        del self.active_games[user_id]  # إغلاق اللعبة  
+  
+    def cashout(self, bot, user_id):  
+        game = self.active_games.get(user_id)  
+        if not game:  
+            return "❌ لا توجد لعبة قيد التشغيل."  
+  
+        if game['exploded']:  
+            return "❌ الطيارة انفجرت بالفعل! لا يمكنك السحب."  
+  
+        if game['cashed_out']:  
+            return "❌ لقد سحبت نقاطك بالفعل."  
+  
+        if game['multiplier'] <= 1.0:  
+            return "❌ لا يمكنك السحب قبل أن يتجاوز المضاعف 1.0x."  
+  
+        game['cashed_out'] = True  
+        game['running'] = False  
+  
+        profit = round(game['bet'] * game['multiplier'])  
+        try:  
+            bot.edit_message_text(  
+                chat_id=game['chat_id'],  
+                message_id=game['message_id'],  
+                text=f"✅ تم سحب نقاطك بنجاح عند {game['multiplier']}x!\nربحت: {profit} نقطة",  
+                reply_markup=self.get_main_menu_markup()  # زر العودة للقائمة  
+            )  
+        except Exception as e:  
+            print(f"Error during cashout: {e}")  
+            bot.send_message(game['chat_id'], f"✅ تم سحب نقاطك بنجاح عند {game['multiplier']}x!\nربحت: {profit} نقطة", reply_markup=self.get_main_menu_markup())  
+  
+        del self.active_games[user_id]  
+        return None  
+  
+    def get_plane_game_markup(self):  
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)  
+        markup.row(types.KeyboardButton("💸 سحب النقاط"))  
+        return markup  
+  
+    def get_main_menu_markup(self):  
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)  
+        markup.add(types.KeyboardButton("↩️ العودة للقائمة الرئيسية"))  
+        return markup  
+
+# التعامل مع زر سحب النقاط  
+@bot.message_handler(func=lambda m: m.text == "💸 سحب النقاط")  
+def handle_cashout(message):  
+    user_id = message.chat.id  
+    response = plane_game.cashout(bot, user_id)  
+    if response:  
+        bot.send_message(user_id, response)  
+  
+# التعامل مع زر العودة للقائمة  
+@bot.message_handler(func=lambda m: m.text == "↩️ العودة للقائمة الرئيسية")  
+def back_to_menu(message):  
+    message.text = "/start"  
+    bot.process_new_messages([message])  
+  
+# إنشاء الكائن الصحيح  
+plane_game = PlaneGame()
 
 @bot.callback_query_handler(func=lambda call: call.data == "backup_menu")
 def show_backup_menu(call):
@@ -1459,6 +1580,11 @@ def backup_data(call):
     # جلب بيانات الدعوات
     cursor.execute("SELECT inviter_id, invited_id FROM referrals")
     backup['referrals'] = cursor.fetchall()
+
+    # جلب عدد الأعضاء
+    cursor.execute("SELECT COUNT(*) FROM users")
+    total_users = cursor.fetchone()[0]
+    backup['total_users'] = total_users
 
     # حفظ النسخة في ملف JSON
     with open("backup.json", "w", encoding="utf-8") as f:
@@ -1487,22 +1613,51 @@ def handle_uploaded_backup(message):
     with open("uploaded_backup.json", "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    # استرجاع بيانات المستخدمين
-    for user in data.get("users", []):
-        cursor.execute("""
-            INSERT OR REPLACE INTO users (id, username, points, invites)
-            VALUES (?, ?, ?, ?)
-        """, (user[0], user[1], user[2], user[3]))
+    try:
+        # استرجاع بيانات المستخدمين
+        for user in data.get("users", []):
+            cursor.execute("""
+                INSERT OR REPLACE INTO users (id, username, points, invites)
+                VALUES (?, ?, ?, ?)
+            """, (user[0], user[1], user[2], user[3]))
 
-    # استرجاع بيانات الدعوات
-    for ref in data.get("referrals", []):
+        # استرجاع بيانات الدعوات
+        for ref in data.get("referrals", []):
+            cursor.execute("""
+                INSERT OR IGNORE INTO referrals (inviter_id, invited_id)
+                VALUES (?, ?)
+            """, (ref[0], ref[1]))
+
+        # استرجاع عدد الأعضاء
+        total_users = data.get("total_users", 0)  # تأكد من أن هذه القيمة موجودة في النسخة
+        cursor.execute("UPDATE settings SET total_users = ?", (total_users,))
+
+        # استرجاع إعدادات الألعاب (إذا كانت موجودة)
+        for game in data.get("games", []):
+            # يمكنك تخصيص استرجاع إعدادات الألعاب حسب هيكل البيانات
+            cursor.execute("""
+                INSERT OR REPLACE INTO games (game_id, name, settings)
+                VALUES (?, ?, ?)
+            """, (game["game_id"], game["name"], json.dumps(game["settings"])))
+
+        # استرجاع الإعدادات العامة
+        system_settings = data.get("system_settings", {})
         cursor.execute("""
-            INSERT OR IGNORE INTO referrals (inviter_id, invited_id)
+            INSERT OR REPLACE INTO system_settings (commission_rate, bot_active)
             VALUES (?, ?)
-        """, (ref[0], ref[1]))
+        """, (system_settings.get("commission_rate", 0), system_settings.get("bot_active", True)))
 
-    conn.commit()
-    bot.send_message(message.chat.id, "✅ تم استعادة النسخة الاحتياطية بنجاح.")
+        # استرجاع الإحصائيات
+        statistics = data.get("statistics", {})
+        cursor.execute("""
+            INSERT OR REPLACE INTO statistics (total_referrals)
+            VALUES (?)
+        """, (statistics.get("total_referrals", 0),))
+
+        conn.commit()
+        bot.send_message(message.chat.id, "✅ تم استعادة النسخة الاحتياطية بنجاح.")
+    except Exception as e:
+        bot.send_message(message.chat.id, f"❌ حدث خطأ أثناء استرجاع النسخة: {e}")
 
 # ===================== تشغيل البوت =====================
 while True:
