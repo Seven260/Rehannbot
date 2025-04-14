@@ -313,11 +313,6 @@ def send_welcome(message):
             bot.send_message(user_id, f"🚸| عذراً عزيزي .🔰| عليك الاشتراك في قناة البوت لتتمكن من استخدامه\n\n- https://t.me/{channel[1:]}\n\n‼️| اشترك ثم ارسل /start")
             return
 
-    # إذا كان مشتركًا في القناة، استمر في عرض الرسالة المعتادة
-    if user_id == ADMIN_ID:
-        bot.send_message(user_id, "🛠️ لوحة الإدارة:", reply_markup=get_admin_menu())
-        return
-
     # التحقق من وجود المستخدم في قاعدة البيانات
     cursor.execute("SELECT * FROM users WHERE id=?", (user_id,))
     user = cursor.fetchone()
@@ -355,6 +350,10 @@ def send_welcome(message):
         # إذا كان المستخدم موجودًا في قاعدة البيانات
         bot.send_message(user_id, f"🎉 مرحبا يا👈 {first_name} 👉نورت البوت\n\nرصيدك الحالي👈: {user[2]} نقطة.", 
                          reply_markup=get_user_menu())
+
+    # عرض لوحة الإدارة للأدمن
+    if user_id == ADMIN_ID:
+        bot.send_message(user_id, "🛠️ لوحة الإدارة:", reply_markup=get_admin_menu())
 
 # دالة back_to_admin: هذه الدالة تسمح بالرجوع إلى لوحة الإدارة
 @bot.callback_query_handler(func=lambda call: call.data == "back_to_admin")
