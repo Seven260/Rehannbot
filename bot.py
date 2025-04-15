@@ -37,62 +37,44 @@ user_invites = 0  # عدد الدعوات الخاصة بالمستخدم
 
 bot = telebot.TeleBot(TOKEN)
 
-import sqlite3
-
-# إنشاء اتصال بقاعدة البيانات
+# فتح الاتصال بقاعدة البيانات
 conn = sqlite3.connect("bets.db", check_same_thread=False)
 cursor = conn.cursor()
 
-# ✅ إنشاء جدول `users` إذا لم يكن موجودًا
-cursor.execute('''CREATE TABLE IF NOT EXISTS users (
+# ✅ إنشاء جدول users إذا لم يكن موجودًا
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY,
     username TEXT,
-    points INTEGER
-)''')
+    points INTEGER,
+    invites_from TEXT DEFAULT NULL,
+    invites INTEGER DEFAULT 0
+)
+''')
 
-# ✅ التحقق من وجود العمود `invites` وإضافته إذا لم يكن موجودًا
+# ✅ التحقق من وجود العمود invites_from وإضافته إذا لم يكن موجودًا
+try:
+    cursor.execute("SELECT invites_from FROM users LIMIT 1;")
+except sqlite3.OperationalError:
+    cursor.execute("ALTER TABLE users ADD COLUMN invites_from TEXT DEFAULT NULL;")
+    conn.commit()
+
+# ✅ التحقق من وجود العمود invites وإضافته إذا لم يكن موجودًا
 try:
     cursor.execute("SELECT invites FROM users LIMIT 1;")
 except sqlite3.OperationalError:
     cursor.execute("ALTER TABLE users ADD COLUMN invites INTEGER DEFAULT 0;")
     conn.commit()
 
-# ✅ إنشاء جدول `referrals` إذا لم يكن موجودًا
-cursor.execute('''CREATE TABLE IF NOT EXISTS referrals (
-    inviter_id INTEGER,
-    invited_id INTEGER,
-    PRIMARY KEY (inviter_id, invited_id)
-)''')
-
-# ✅ إنشاء جدول `tasks` إذا لم يكن موجودًا
-cursor.execute('''CREATE TABLE IF NOT EXISTS tasks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_name TEXT,
-    task_type TEXT,
-    task_goal INTEGER,
-    reward INTEGER
-)''')
-
-# ✅ إنشاء جدول `daily_tasks` إذا لم يكن موجودًا
+# ✅ إنشاء جدول referrals إذا لم يكن موجودًا (مهم لرابط الدعوة)
 cursor.execute('''
-    CREATE TABLE IF NOT EXISTS daily_tasks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        task TEXT NOT NULL,
-        points INTEGER NOT NULL
+    CREATE TABLE IF NOT EXISTS referrals (
+        inviter_id INTEGER,
+        invited_id INTEGER,
+        PRIMARY KEY (inviter_id, invited_id)
     )
 ''')
-
-# ✅ إنشاء جدول `user_tasks` إذا لم يكن موجودًا
-cursor.execute('''
-    CREATE TABLE IF NOT EXISTS user_tasks (
-        user_id INTEGER,
-        task_id INTEGER,
-        completed BOOLEAN DEFAULT 0,
-        UNIQUE(user_id, task_id)
-    )
-''')
-
-conn.commit()  # حفظ التغييرات في قاعدة البيانات
+conn.commit()
 
 # ✅ دالة لإضافة النقاط للمستخدم (تسجل تلقائيًا إذا لم يكن موجود)
 def add_points(user_id, amount, username=None):
@@ -213,10 +195,15 @@ def get_games_menu():
     )
     markup.add(
         KeyboardButton("🎡 عجلة الحظ"),
-        KeyboardButton("✈️ لعبة الطيارة")  # ✅ زر لعبة الطيارة الجديد
+        KeyboardButton("✈️ لعبة الطيارة")
+    )
+    markup.add(
+        KeyboardButton("🎰 ماكينة الحظ"),
+        KeyboardButton("حجرة ورقة مقص👊")
     )
     markup.add(
         KeyboardButton("🧠 اختبار الذاكرة"),
+        KeyboardButton("🏆 تخمين مكان الكرة"),
         KeyboardButton("⬅ العودة")
     )
     return markup
@@ -297,7 +284,7 @@ def toggle_bot(call):
 def show_bot_settings(call):
     update_admin_message(call.message.chat.id, call.message.message_id, "🔧 **إعدادات البوت:**", get_bot_settings_menu())
 
-# دالة لإعادة المستخدم إلى لوحة الإدارة عند الضغط على زر العودة
+# دالة لإظهار إعدادات البوت
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     user_id = message.chat.id
@@ -307,51 +294,194 @@ def send_welcome(message):
 
     full_name = f"{first_name} {last_name}" if last_name else first_name
 
-    # التحقق من الاشتراك في القناة
-    for channel in REQUIRED_CHANNELS:  # تأكد من فحص جميع القنوات
+    if not BOT_ACTIVE and user_id != ADMIN_ID:
+        bot.send_message(user_id, "⚠️ البوت متوقف حاليًا من قبل الإدارة.")
+        return
+
+    # التحقق من الاشتراك في القنوات المطلوبة
+    for channel in REQUIRED_CHANNELS:
         if not is_subscribed(user_id, channel):
-            bot.send_message(user_id, f"🚸| عذراً عزيزي .🔰| عليك الاشتراك في قناة البوت لتتمكن من استخدامه\n\n- https://t.me/{channel[1:]}\n\n‼️| اشترك ثم ارسل /start")
+            bot.send_message(
+                user_id,
+                f"🚸| عذراً عزيزي .🔰| عليك الاشتراك في قناة البوت لتتمكن من استخدامه\n\n- https://t.me/{channel[1:]}\n\n‼️| اشترك ثم ارسل /start"
+            )
             return
 
-    # التحقق من وجود المستخدم في قاعدة البيانات
+    # استخراج referrer_id من رابط الدعوة
+    args = message.text.split()
+    referrer_id = None
+    if len(args) > 1 and INVITE_ENABLED:
+        try:
+            referrer_id = int(args[1])
+        except ValueError:
+            referrer_id = None
+
+    # التحقق مما إذا كان المستخدم مسجلًا بالفعل في قاعدة البيانات
     cursor.execute("SELECT * FROM users WHERE id=?", (user_id,))
     user = cursor.fetchone()
 
-    if user is None:
-        # إذا لم يكن المستخدم موجودًا، أضفه
+    if not user:
+        # تسجيل المستخدم الجديد في قاعدة البيانات
         cursor.execute("INSERT INTO users (id, username, points) VALUES (?, ?, ?)", (user_id, username, 0))
         conn.commit()
 
-        # إرسال إشعار إلى المطور
-        cursor.execute("SELECT COUNT(*) FROM users")
-        total_members = cursor.fetchone()[0]  # عدد الأعضاء في قاعدة البيانات
-        message_text = f"""
-        تم دخول شخص جديد إلى البوت الخاص بك 👾
-        -----------------------
-        • معلومات العضو الجديد :
-        • الاسم : [{full_name}](tg://openmessage?user_id={user_id})
-        • المعرف : @{username} 
-        • الايدي : {user_id}
-        -----------------------
-        • عدد الأعضاء الكلي : {total_members}
-        """
-        bot.send_message(ADMIN_ID, message_text, parse_mode='Markdown')
+        # التحقق من أن المستخدم دخل عبر رابط الدعوة ولم يحصل على النقاط من قبل
+        if referrer_id and referrer_id != user_id:
+            cursor.execute("SELECT * FROM referrals WHERE inviter_id=? AND invited_id=?", (referrer_id, user_id))
+            referral_exists = cursor.fetchone()
 
-        # رسالة ترحيب للمستخدم الجديد
+            if not referral_exists:
+                add_points(referrer_id, INVITE_POINTS)
+                cursor.execute("INSERT INTO referrals (inviter_id, invited_id) VALUES (?, ?)", (referrer_id, user_id))
+                conn.commit()
+
+                # إشعار المُحيل
+                bot.send_message(
+                    referrer_id,
+                    f"🎉 هنيئاً لك!\n"
+                    f"شخص جديد انضم عبر رابط الدعوة الخاص بك وهو: <a href=\"tg://user?id={user_id}\">{first_name}</a>\n"
+                    f"وقد حصلت على {INVITE_POINTS} نقطة كمكافأة!\n"
+                    f"✨ استمر بمشاركة الرابط لجمع المزيد من النقاط!",
+                    parse_mode="HTML"
+                )
+
+                # إشعار المستخدم الجديد
+                bot.send_message(
+                    user_id,
+                    f"✨ تم تسجيلك عبر رابط دعوة صديقك!\n"
+                    f"وقد حصل هو على نقاط كمكافأة لدعوتك.\n"
+                    f"ابدأ رحلتك وجمع النقاط من خلال الدعوة أيضاً!",
+                    parse_mode="HTML"
+                )
+
+        # إشعار الإدمن بعدد الأعضاء
+        cursor.execute("SELECT COUNT(*) FROM users")
+        total_members = cursor.fetchone()[0]
+        message_text = f"""
+تم دخول شخص جديد إلى البوت الخاص بك 👾
+-----------------------
+• الاسم : <a href="tg://user?id={user_id}">{full_name}</a>
+• المعرف : @{username}
+• الايدي : {user_id}
+-----------------------
+• عدد الأعضاء الكلي : {total_members}
+        """
+        bot.send_message(ADMIN_ID, message_text, parse_mode='HTML')
+
+        # ترحيب بالمستخدم الجديد
         bot.send_message(user_id, "👋 هلا بيك حبيبي نورت البوت\n\nمعاك مطور البوت👈𝑩𝑳𝑨𝑪𝑲\n\nشرح البوت👇\n\n"
                                   "1👈شحن النقاط عن طريق الوكيل للعب الالعاب\n\n"
                                   "2👈بعد شحن النقاط يمكنك لعب الالعاب، كل لعبة لها سعر\n\n"
                                   "3👈بعد بدء العبة عند الإجابة الصحيحة تكسب نقاط، عند الإجابة الخاطئة تخسر نقاط\n\n"
                                   "4👈تجميع النقاط عبر الهدايا التي ستنزل في قناة البوت\n\n"
                                   "5👈تجميع النقاط عند مشاركة رابط الدعوة\n\n"
-                                  "6👈يمكنك استبدال نقاط البوت بنقاط بوت تمويل، كل 10 نقاط في البوت = 100 نقطة", 
-                                  reply_markup=get_user_menu())
+                                  "6👈يمكنك استبدال نقاط البوت بنقاط بوت تمويل، كل 10 نقاط = 100 نقطة",
+                         reply_markup=get_user_menu())
     else:
-        # إذا كان المستخدم موجودًا في قاعدة البيانات
-        bot.send_message(user_id, f"🎉 مرحبا يا👈 {first_name} 👉نورت البوت\n\nرصيدك الحالي👈: {user[2]} نقطة.", 
+        bot.send_message(user_id, f"🎉 مرحبا يا👈 {first_name} 👉نورت البوت \n\nرصيدك الحالي👈: {user[2]} نقطة.",
                          reply_markup=get_user_menu())
 
-    # عرض لوحة الإدارة للأدمن
+    # أخيرًا: عرض لوحة الإدارة إن كان الأدمن
+    if user_id == ADMIN_ID:
+        bot.send_message(user_id, "🛠️ لوحة الإدارة:", reply_markup=get_admin_menu())
+
+
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    user_id = message.chat.id
+    username = message.from_user.username if message.from_user.username else "NoUsername"
+    first_name = message.from_user.first_name
+    last_name = message.from_user.last_name if message.from_user.last_name else ""
+    full_name = f"{first_name} {last_name}" if last_name else first_name
+
+    if not BOT_ACTIVE and user_id != ADMIN_ID:
+        bot.send_message(user_id, "⚠️ البوت متوقف حاليًا من قبل الإدارة.")
+        return
+
+    # التحقق من الاشتراك في القنوات المطلوبة
+    for channel in REQUIRED_CHANNELS:
+        if not is_subscribed(user_id, channel):
+            bot.send_message(
+                user_id,
+                f"🚸| عذراً عزيزي .🔰| عليك الاشتراك في قناة البوت لتتمكن من استخدامه\n\n- https://t.me/{channel[1:]}\n\n‼️| اشترك ثم ارسل /start"
+            )
+            return
+
+    # استخراج referrer_id من رابط الدعوة
+    args = message.text.split()
+    referrer_id = None
+    if len(args) > 1 and INVITE_ENABLED:
+        try:
+            referrer_id = int(args[1])
+        except ValueError:
+            referrer_id = None
+
+    # التحقق مما إذا كان المستخدم مسجلًا بالفعل في قاعدة البيانات
+    cursor.execute("SELECT * FROM users WHERE id=?", (user_id,))
+    user = cursor.fetchone()
+
+    if not user:
+        # تسجيل المستخدم الجديد في قاعدة البيانات
+        cursor.execute("INSERT INTO users (id, username, points) VALUES (?, ?, ?)", (user_id, username, 0))
+        conn.commit()
+
+        # التحقق من أن المستخدم دخل عبر رابط الدعوة ولم يحصل على النقاط من قبل
+        if referrer_id and referrer_id != user_id:
+            cursor.execute("SELECT * FROM referrals WHERE inviter_id=? AND invited_id=?", (referrer_id, user_id))
+            referral_exists = cursor.fetchone()
+
+            if not referral_exists:
+                add_points(referrer_id, INVITE_POINTS)
+                cursor.execute("INSERT INTO referrals (inviter_id, invited_id) VALUES (?, ?)", (referrer_id, user_id))
+                conn.commit()
+
+                # إشعار المُحيل
+                bot.send_message(
+                    referrer_id,
+                    f"🎉 هنيئاً لك!\n"
+                    f"شخص جديد انضم عبر رابط الدعوة الخاص بك وهو: <a href=\"tg://user?id={user_id}\">{first_name}</a>\n"
+                    f"وقد حصلت على {INVITE_POINTS} نقطة كمكافأة!\n"
+                    f"✨ استمر بمشاركة الرابط لجمع المزيد من النقاط!",
+                    parse_mode="HTML"
+                )
+
+                # إشعار المستخدم الجديد
+                bot.send_message(
+                    user_id,
+                    f"✨ تم تسجيلك عبر رابط دعوة صديقك!\n"
+                    f"وقد حصل هو على نقاط كمكافأة لدعوتك.\n"
+                    f"ابدأ رحلتك وجمع النقاط من خلال الدعوة أيضاً!",
+                    parse_mode="HTML"
+                )
+
+        # إشعار الإدمن بعدد الأعضاء
+        cursor.execute("SELECT COUNT(*) FROM users")
+        total_members = cursor.fetchone()[0]
+        message_text = f"""
+تم دخول شخص جديد إلى البوت الخاص بك 👾
+-----------------------
+• الاسم : <a href="tg://user?id={user_id}">{full_name}</a>
+• المعرف : @{username}
+• الايدي : {user_id}
+-----------------------
+• عدد الأعضاء الكلي : {total_members}
+        """
+        bot.send_message(ADMIN_ID, message_text, parse_mode='HTML')
+
+        # ترحيب بالمستخدم الجديد
+        bot.send_message(user_id, "👋 هلا بيك حبيبي نورت البوت\n\nمعاك مطور البوت👈𝑩𝑳𝑨𝑪𝑲\n\nشرح البوت👇\n\n"
+                                  "1👈شحن النقاط عن طريق الوكيل للعب الالعاب\n\n"
+                                  "2👈بعد شحن النقاط يمكنك لعب الالعاب، كل لعبة لها سعر\n\n"
+                                  "3👈بعد بدء العبة عند الإجابة الصحيحة تكسب نقاط، عند الإجابة الخاطئة تخسر نقاط\n\n"
+                                  "4👈تجميع النقاط عبر الهدايا التي ستنزل في قناة البوت\n\n"
+                                  "5👈تجميع النقاط عند مشاركة رابط الدعوة\n\n"
+                                  "6👈يمكنك استبدال نقاط البوت بنقاط بوت تمويل، كل 10 نقاط = 100 نقطة",
+                         reply_markup=get_user_menu())
+    else:
+        bot.send_message(user_id, f"🎉 مرحبا يا👈 {first_name} 👉نورت البوت \n\nرصيدك الحالي👈: {user[2]} نقطة.",
+                         reply_markup=get_user_menu())
+
+    # أخيرًا: عرض لوحة الإدارة إن كان الأدمن
     if user_id == ADMIN_ID:
         bot.send_message(user_id, "🛠️ لوحة الإدارة:", reply_markup=get_admin_menu())
 
@@ -366,82 +496,92 @@ def back_to_admin(call):
         reply_markup=get_admin_menu()  # تأكد من أنك تستخدم لوحة الأدمن هنا
     )
 
+@bot.message_handler(commands=['id'])
+def send_user_id(message):
+    user_id = message.chat.id
+    bot.send_message(user_id, f"🆔 ايديك هو:\n`{user_id}`", parse_mode="Markdown")
+
 @bot.message_handler(commands=['add'])
 def add_or_subtract_points(message):
     try:
-        # استخراج user_id و points من النص
         args = message.text.split()
-        
+
         if len(args) != 3:
-            bot.send_message(message.chat.id, "❌ الصيغة غير صحيحة. استخدم: /add <user_id> <points>")
+            bot.send_message(message.chat.id, "❌ الصيغة غير صحيحة. استخدم:\n`/add <user_id> <points>`", parse_mode="Markdown")
             return
-        
+
         user_id = int(args[1])
         points = int(args[2])
-        
-        # تحقق إذا كان المستخدم قد أرسل رقم النقاط بشكل صحيح
-        if points == 0:
-            bot.send_message(message.chat.id, "❌ النقاط يجب أن تكون عددًا غير صفر.")
+
+        cursor.execute("SELECT points FROM users WHERE id=?", (user_id,))
+        user = cursor.fetchone()
+
+        if not user:
+            bot.send_message(message.chat.id, "❌ المستخدم غير موجود في قاعدة البيانات.")
             return
-        
-        # إضافة أو خصم النقاط حسب القيمة
-        if points > 0:
-            # إضافة النقاط
-            add_points(user_id, points)
-            bot.send_message(message.chat.id, f"✅ تم إضافة {points} نقطة للمستخدم {user_id}.")
-        else:
-            # خصم النقاط
-            subtract_points(user_id, abs(points))
-            bot.send_message(message.chat.id, f"✅ تم خصم {abs(points)} نقطة من المستخدم {user_id}.")
-        
-        # إشعار المستخدم بالنقاط المضافة أو المخصومة
-        bot.send_message(user_id, f"📬 تم {('إضافة' if points > 0 else 'خصم')} {abs(points)} نقطة من رصيدك.")
+
+        current_points = user[0]
+        new_points = current_points + points
+
+        if new_points < 0:
+            bot.send_message(message.chat.id, "❌ لا يمكن خصم نقاط أكثر من الرصيد الحالي.")
+            return
+
+        cursor.execute("UPDATE users SET points=? WHERE id=?", (new_points, user_id))
+        conn.commit()
+
+        action = "إضافة" if points > 0 else "خصم"
+        bot.send_message(message.chat.id, f"✅ تم {action} {abs(points)} نقطة للمستخدم {user_id}.")
+
+        bot.send_message(user_id, f"📬 🎉 تم {('إضافة' if points > 0 else 'خصم')} {abs(points)} نقطة إلى رصيدك بواسطة المطور! شكرًا لاستخدامك البوت. 😊")
     
     except Exception as e:
         bot.send_message(message.chat.id, f"❌ حدث خطأ: {str(e)}")
 
-# دالة لإضافة النقاط
-def add_points(user_id, points):
-    if user_id not in users_points:
-        users_points[user_id] = 0
-    users_points[user_id] += points
-
-# دالة لخصم النقاط
-def subtract_points(user_id, points):
-    if user_id not in users_points or users_points[user_id] < points:
-        bot.send_message(user_id, "❌ ليس لديك نقاط كافية.")
-        return
-    users_points[user_id] -= points
-
 @bot.message_handler(func=lambda m: m.text == "🎟 دعوة الأصدقاء")
-def invite_friends(message):
-    user_id = message.chat.id  # ✅ تعريف user_id في البداية
+def referral_handler(message):
+    user_id = message.chat.id
 
-    if not BOT_ACTIVE:
-        bot.send_message(user_id, "⚠️ البوت متوقف حاليًا، لا يمكنك دعوة الأصدقاء الآن.")
-        return
+    # تحقق إذا البوت شغال
+    if not bot_running:
+        return bot.send_message(user_id, "⚠️ البوت متوقف حالياً. حاول لاحقاً.")
 
-    invite_link = f"https://t.me/{bot.get_me().username}?start={user_id}"
+    # تحقق من الاشتراك في القنوات المطلوبة
+    for channel in REQUIRED_CHANNELS:
+        if not is_subscribed(user_id, channel):
+            return bot.send_message(
+                user_id,
+                f"🚸| عليك الاشتراك أولاً في قناة البوت:\nhttps://t.me/{channel[1:]}\nثم ارسل الأمر مجدداً."
+            )
 
-    # جلب عدد الدعوات من قاعدة البيانات
-    cursor.execute("SELECT invites FROM users WHERE id=?", (user_id,))
-    row = cursor.fetchone()
-    user_invites = row[0] if row else 0  # إذا لم يكن هناك سجل، افتراضيًا 0
-    invite_link = f"https://t.me/{bot.get_me().username}?start={user_id}"
-    bot.send_message(user_id, f"انسخ الرابط ثم قم بمشاركته مع اصدقائك 📥 .\n\n • كل شخص يقوم بالدخول ستحصل على {INVITE_POINTS} 💲\n\n  بإمكانك عمل اعلان خاص برابط الدعوة الخاص بك\n\n ~ رابط الدعوة :{invite_link}\n\n• مشاركتك للرابط : {user_invites} 🌀", parse_mode="Markdown")
+    # توليد رابط الإحالة
+    bot_username = bot.get_me().username
+    referral_link = f"https://t.me/{bot_username}?start={user_id}"
+
+    # حساب عدد المدعوين
+    cursor.execute("SELECT COUNT(*) FROM referrals WHERE inviter_id=?", (user_id,))
+    invite_count = cursor.fetchone()[0]
+
+    # إرسال الرسالة
+    bot.send_message(user_id, f"""
+انسخ الرابط ثم قم بمشاركته مع اصدقائك 📥 .
+
+• كل شخص يقوم بالدخول ستحصل على {INVITE_POINTS} 💲
+
+~ رابط الدعوة : {referral_link}
+
+• عدد الاشخاص الذين دخلوا عبر رابطك : {invite_count} 🌀
+    """)
 
 @bot.message_handler(func=lambda m: m.text == "💳 شحن الرصيد")
 def charge_points(message):
-    user_id = message.chat.id  # ✅ تعريف user_id في بداية الدالة
-
-    if not BOT_ACTIVE:
-        bot.send_message(user_id, "⚠️ البوت متوقف حاليًا، لا يمكنك دعوة الأصدقاء الآن.")
+    user_id = message.chat.id
+    if not bot_running:
+        bot.send_message(message.chat.id, "⚠️ ميزة شحن الرصيد متوقفة حاليًا.")
         return
-
-    if not CHARGE_POINTS_ACTIVE:  # تحقق من حالة سحب الرصيد
-        bot.send_message(user_id, "⚠️ ميزة شحن الرصيد غير مفعلة حاليًا.")
-        return
-
+    for channel in REQUIRED_CHANNELS:
+        if not is_subscribed(user_id, channel):
+            return bot.send_message(user_id, f"🚸| عذراً عزيزي، عليك الاشتراك في القناة لتتمكن من لعب لعبة الطيارة.\n\n- {channel}")
     # إنشاء زر شفاف يحتوي على رابط الوكيل
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("💳 تواصل مع الوكيل", url=SUPPORT_LINK))
@@ -474,7 +614,9 @@ def show_games(message):
 @bot.message_handler(func=lambda m: m.text == "✈️ لعبة الطيارة")
 def start_plane(message):
     user_id = message.chat.id
-
+    if not bot_running:
+        bot.send_message(message.chat.id, "⚠️ لعبة الطيارة متوقفة حاليًا")
+        return
     # فحص الاشتراك في القنوات
     for channel in REQUIRED_CHANNELS:
         if not is_subscribed(user_id, channel):
@@ -540,12 +682,129 @@ def add_points(message):
     users_points[user_id] += points
     bot.send_message(user_id, f"✅ تم إضافة {points} نقطة. رصيدك الحالي: {users_points[user_id]} نقطة.")
 
+@bot.message_handler(func=lambda m: m.text == "حجرة ورقة مقص👊")
+def play_rps(message):
+    user_id = message.chat.id
+
+    if not bot_running:
+        return bot.send_message(user_id, "⚠️ لعبة حجرة ورقة مقص متوقفة حاليًا.")
+
+    for channel in REQUIRED_CHANNELS:
+        if not is_subscribed(user_id, channel):
+            return bot.send_message(user_id, f"🚸| يجب الاشتراك في القناة: {channel}")
+
+    cursor.execute("SELECT points FROM users WHERE id=?", (user_id,))
+    row = cursor.fetchone()
+    if not row or row[0] < 5:
+        return bot.send_message(user_id, "❌ تحتاج 5 نقاط للدخول. اشحن أولاً.")
+
+    remove_points(user_id, 5)
+
+    markup = ReplyKeyboardMarkup(resize_keyboard=True, one_time_keyboard=True)
+    markup.add("✊", "✋", "✌️")
+    msg = bot.send_message(user_id, "اختر:\n✊ = حجرة\n✋ = ورقة\n✌️ = مقص", reply_markup=markup)
+    bot.register_next_step_handler(msg, process_rps)
+
+def process_rps(message):
+    user_choice = message.text
+    user_id = message.chat.id
+    choices = ["✊", "✋", "✌️"]
+
+    if user_choice not in choices:
+        return bot.send_message(user_id, "❌ خيار غير صحيح. استخدم الزر.")
+
+    bot_choice = random.choice(choices)
+    result = ""
+
+    if user_choice == bot_choice:
+        result = f"🤝 تعادل! كلاكما اختار {bot_choice}"
+        add_points(user_id, 5)
+    elif (user_choice == "✊" and bot_choice == "✌️") or \
+         (user_choice == "✋" and bot_choice == "✊") or \
+         (user_choice == "✌️" and bot_choice == "✋"):
+        result = f"✅ فزت! {user_choice} تغلب على {bot_choice}"
+        add_points(user_id, 10)
+    else:
+        result = f"❌ خسرت! {bot_choice} تغلب على {user_choice}"
+
+    bot.send_message(user_id, result, reply_markup=get_user_menu())
+
+@bot.message_handler(func=lambda m: m.text == "🎰 ماكينة الحظ")
+def slot_machine_game(message):
+    user_id = message.chat.id
+
+    if not bot_running:
+        return bot.send_message(user_id, "⚠️ لعبة مكينة الحظ متوقفة حاليًا.")
+
+    for channel in REQUIRED_CHANNELS:
+        if not is_subscribed(user_id, channel):
+            return bot.send_message(user_id, f"🚸| يجب الاشتراك في القناة: {channel}")
+
+    cursor.execute("SELECT points FROM users WHERE id=?", (user_id,))
+    user = cursor.fetchone()
+    if not user:
+        bot.send_message(user_id, "❌ لم يتم العثور على حسابك.")
+        return
+
+    current_points = user[0]
+    if current_points < 10:
+        bot.send_message(user_id, "❌ تحتاج 10 نقاط على الأقل للعب.")
+        return
+
+    new_points = current_points - 10
+    cursor.execute("UPDATE users SET points=? WHERE id=?", (new_points, user_id))
+    conn.commit()
+
+    import random
+    small_win_symbols = ["🍒", "🍋", "🍉", "🍇", "🍎"]
+    big_win_symbols = ["💎", "💰", "⭐"]
+    all_symbols = small_win_symbols + big_win_symbols
+
+    roll_type = random.choices(
+        ["loss", "small_win", "big_win"],
+        weights=[60, 30, 10],
+        k=1
+    )[0]
+
+    if roll_type == "small_win":
+        sym = random.choice(small_win_symbols)
+        result = [sym, sym, sym]
+        reward = 10
+        msg = f"{sym*3} | فزت بـ 10 نقاط!"
+
+    elif roll_type == "big_win":
+        sym = random.choice(big_win_symbols)
+        result = [sym, sym, sym]
+        reward = {"💎": 50, "💰": 30, "⭐": 20}[sym]
+        msg = f"{sym*3} | فزت بـ {reward} نقطة!"
+
+    else:  # خسارة
+        while True:
+            result = [random.choice(all_symbols) for _ in range(3)]
+            if not (result[0] == result[1] == result[2]):
+                break
+        reward = 0
+        msg = f"{result[0]} | {result[1]} | {result[2]} | خسرت، جرب تاني."
+
+    if reward > 0:
+        new_points += reward
+        cursor.execute("UPDATE users SET points=? WHERE id=?", (new_points, user_id))
+        conn.commit()
+
+    bot.send_message(
+        user_id,
+        f"🎰 ماكينة الحظ 🎰\n\n{msg}\n\nرصيدك الحالي: {new_points} نقطة"
+    )
+
 @bot.message_handler(func=lambda m: m.text == "🏆 تخمين مكان الكرة")
 def play_guess_ball(message):
     user_id = message.chat.id
     if not bot_running:
-        bot.send_message(message.chat.id, "⚠️ البوت متوقف حاليًا. يرجى المحاولة لاحقًا.")
+        bot.send_message(message.chat.id, "⚠️ لعبة تخمين مكان الكرة متوقفة حاليًا")
         return
+    for channel in REQUIRED_CHANNELS:
+        if not is_subscribed(user_id, channel):
+            return bot.send_message(user_id, f"🚸| عذراً عزيزي، عليك الاشتراك في القناة لتتمكن من لعب لعبة الطيارة.\n\n- {channel}")
     # التحقق من رصيد اللاعب
     cursor.execute("SELECT points FROM users WHERE id=?", (user_id,))
     row = cursor.fetchone()
@@ -589,8 +848,13 @@ def back_to_main(message):
 def play_guess(message):
     user_id = message.chat.id
     if not bot_running:
-        bot.send_message(message.chat.id, "⚠️ البوت متوقف حاليًا. يرجى المحاولة لاحقًا.")
+        bot.send_message(user_id, "⚠️ لعبة تخمين الرقم متوقفة حاليًا.")
         return
+
+    # فحص الاشتراك في القنوات
+    for channel in REQUIRED_CHANNELS:
+        if not is_subscribed(user_id, channel):
+            return bot.send_message(user_id, f"🚸| عذراً عزيزي، عليك الاشتراك في القناة لتتمكن من لعب لعبة الطيارة.\n\n- {channel}")
     cursor.execute("SELECT points FROM users WHERE id=?", (user_id,))
     row = cursor.fetchone()
     if not row or row[0] < GAME_SETTINGS["guess"]["entry"]:
@@ -671,7 +935,12 @@ trivia_questions = [
 @bot.message_handler(func=lambda message: message.text == "💰 معرفة الرصيد")
 def show_balance(message):
     user_id = message.from_user.id
-
+    if not bot_running:
+        bot.send_message(message.chat.id, "⚠️ميزة معرفة الرصيد متوقفة حاليًا.")
+        return
+    for channel in REQUIRED_CHANNELS:
+        if not is_subscribed(user_id, channel):
+            return bot.send_message(user_id, f"🚸| عذراً عزيزي، عليك الاشتراك في القناة لتتمكن من لعب لعبة الطيارة.\n\n- {channel}")
     # استعلام لجلب رصيد المستخدم
     cursor.execute("SELECT points FROM users WHERE id=?", (user_id,))
     user = cursor.fetchone()
@@ -684,19 +953,27 @@ def show_balance(message):
 
 @bot.message_handler(func=lambda m: m.text == "🔄 تحويل النقاط")
 def transfer_points(message):
+    user_id = message.chat.id
 
-    if not BOT_ACTIVE:
-        bot.send_message(message.chat.id, "⚠️ البوت متوقف حاليًا، لا يمكنك دعوة الأصدقاء الآن.")
+    # تحقق من حالة البوت
+    if not bot_running:
+        bot.send_message(user_id, "⚠️ ميزة تحويل النقاط متوقفة حاليًا.")
         return
 
-    bot.send_message(message.chat.id, "🔢 أرسل معرف المستخدم والمبلغ المراد تحويله بالشكل التالي:\n`user_id amount`", parse_mode="Markdown")
+    # فحص الاشتراك في القنوات
+    for channel in REQUIRED_CHANNELS:
+        if not is_subscribed(user_id, channel):
+            return bot.send_message(user_id, f"🚸| عذراً عزيزي، عليك الاشتراك في القناة لتتمكن من لعب لعبة الطيارة.\n\n- {channel}")
+
+    # طلب المعرف والمبلغ
+    bot.send_message(user_id, "🔢 أرسل معرف المستخدم والمبلغ المراد تحويله بالشكل التالي:\n`user_id amount`", parse_mode="Markdown")
     bot.register_next_step_handler(message, process_transfer)
 
 def process_transfer(message):
     try:
         sender_id = message.chat.id
 
-        if not BOT_ACTIVE:
+        if not bot_running:
             bot.send_message(sender_id, "⚠️ البوت متوقف حاليًا، لا يمكنك تحويل النقاط الآن.")
             return
 
@@ -724,12 +1001,21 @@ def process_transfer(message):
 
         bot.send_message(sender_id, f"✅ تم تحويل {final_amount} نقطة إلى المستخدم {recipient_id}. (تم خصم {fee} نقطة كعمولة)")
         bot.send_message(recipient_id, f"🎉 لقد استلمت {final_amount} نقطة من المستخدم {sender_id}!")
+        
     except ValueError:
         bot.send_message(message.chat.id, "❌ تنسيق غير صحيح، استخدم: `user_id amount`", parse_mode="Markdown")
 
 @bot.message_handler(func=lambda message: message.text == "💳 سحب النقاط")
 def withdraw_points(message):
     user_id = message.chat.id
+    if not bot_running:
+        bot.send_message(user_id, "⚠️ ميزة سحب النقاط متوقفة حاليًا.")
+        return
+
+    # فحص الاشتراك في القنوات
+    for channel in REQUIRED_CHANNELS:
+        if not is_subscribed(user_id, channel):
+            return bot.send_message(user_id, f"🚸| عذراً عزيزي، عليك الاشتراك في القناة لتتمكن من لعب لعبة الطيارة.\n\n- {channel}")
     cursor.execute("SELECT points FROM users WHERE id=?", (user_id,))
     row = cursor.fetchone()
 
@@ -738,10 +1024,6 @@ def withdraw_points(message):
         return
     
     user_points = row[0]
-    
-    if not BOT_ACTIVE:
-        bot.send_message(user_id, "⚠️ البوت متوقف حاليًا، لا يمكنك دعوة الأصدقاء الآن.")
-        return
 
     markup = InlineKeyboardMarkup()
     markup.add(InlineKeyboardButton("❌ إلغاء العملية", callback_data="cancel_withdraw"))
@@ -914,15 +1196,17 @@ def complete_task(call):
 
     bot.answer_callback_query(call.id, f"🎉 لقد أكملت المهمة بنجاح وحصلت على {points} نقطة!")
     bot.send_message(user_id, f"🎉 لقد أكملت المهمة وحصلت على {points} نقطة!")
+
 #الاسئلة العامة
 @bot.message_handler(func=lambda m: m.text == button_names["trivia"])
 def play_trivia(message):
     user_id = message.chat.id
-
     if not bot_running:
-        bot.send_message(user_id, "⚠️ البوت متوقف حاليًا. يرجى المحاولة لاحقًا.")
+        bot.send_message(user_id, "⚠️ لعبة الأسئلة ألعامة متوقفة حاليًا.")
         return
-
+    for channel in REQUIRED_CHANNELS:
+        if not is_subscribed(user_id, channel):
+            return bot.send_message(user_id, f"🚸| عذراً عزيزي، عليك الاشتراك في القناة لتتمكن من لعب لعبة الطيارة.\n\n- {channel}")
     cursor.execute("SELECT points FROM users WHERE id=?", (user_id,))
     row = cursor.fetchone()
 
@@ -978,8 +1262,11 @@ def play_trivia(message):
 def play_wheel_game(message):
     user_id = message.chat.id
     if not bot_running:
-        bot.send_message(message.chat.id, "⚠️ البوت متوقف حاليًا. يرجى المحاولة لاحقًا.")
+        bot.send_message(message.chat.id, "⚠️ لعبة عجلة الحظ متوقفة حاليًا")
         return
+    for channel in REQUIRED_CHANNELS:
+        if not is_subscribed(user_id, channel):
+            return bot.send_message(user_id, f"🚸| عذراً عزيزي، عليك الاشتراك في القناة لتتمكن من لعب لعبة الطيارة.\n\n- {channel}")
     # التحقق من رصيد المستخدم
     cursor.execute("SELECT points FROM users WHERE id=?", (user_id,))
     row = cursor.fetchone()
@@ -1017,9 +1304,11 @@ def play_wheel_game(message):
 def play_memory_game(message):
     user_id = message.chat.id
     if not bot_running:
-        bot.send_message(message.chat.id, "⚠️ البوت متوقف حاليًا. يرجى المحاولة لاحقًا.")
+        bot.send_message(message.chat.id, "⚠️ لعبة اختبار الذاكرة متوقفة حاليًا.")
         return
-
+    for channel in REQUIRED_CHANNELS:
+        if not is_subscribed(user_id, channel):
+            return bot.send_message(user_id, f"🚸| عذراً عزيزي، عليك الاشتراك في القناة لتتمكن من لعب لعبة الطيارة.\n\n- {channel}")
     # التحقق من الرصيد
     cursor.execute("SELECT points FROM users WHERE id=?", (user_id,))
     row = cursor.fetchone()
